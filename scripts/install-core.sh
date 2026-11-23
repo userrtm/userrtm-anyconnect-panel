@@ -117,6 +117,9 @@ python3 -m venv /opt/ocserv-panel/.venv
 /opt/ocserv-panel/.venv/bin/pip install --upgrade pip
 /opt/ocserv-panel/.venv/bin/pip install -r /opt/ocserv-panel/requirements.txt
 chown -R root:root /opt/ocserv-panel
+# The panel service account must be able to traverse and execute the venv.
+chmod -R a+rX /opt/ocserv-panel
+chmod 0755 /opt/ocserv-panel/.venv/bin/python /opt/ocserv-panel/.venv/bin/gunicorn
 
 cat > /usr/local/sbin/ocserv-nat <<'NAT'
 #!/usr/bin/env bash
@@ -128,6 +131,26 @@ iptables -C FORWARD -d 10.20.30.0/24 -i "$WAN_IF" -m conntrack --ctstate RELATED
 iptables -t nat -C POSTROUTING -s 10.20.30.0/24 -o "$WAN_IF" -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s 10.20.30.0/24 -o "$WAN_IF" -j MASQUERADE
 NAT
 chmod 0750 /usr/local/sbin/ocserv-nat
+
+cat > /etc/systemd/system/ocserv-panel-expire.service <<'UNIT'
+[Unit]
+Description=Expire overdue ocserv customer accounts
+After=ocserv.service
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ocserv-panel-helper --expire
+UNIT
+
+cat > /etc/systemd/system/ocserv-panel-expire.timer <<'TIMER'
+[Unit]
+Description=Check ocserv customer expiry every five minutes
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Persistent=true
+[Install]
+WantedBy=timers.target
+TIMER
 
 cat > /etc/systemd/system/ocserv-nat.service <<'UNIT'
 [Unit]
@@ -174,7 +197,8 @@ ocserv -t -c /etc/ocserv/ocserv.conf
 
 echo "Set the panel administrator account."
 cd /opt/ocserv-panel
-sudo -u ocserv-panel /opt/ocserv-panel/.venv/bin/python app.py bootstrap
+/opt/ocserv-panel/.venv/bin/python app.py bootstrap
+chown -R ocserv-panel:ocserv-panel /var/lib/ocserv-panel
 
 if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
   ufw allow 80/tcp
@@ -188,6 +212,7 @@ systemctl enable --now ocserv-nat.service
 systemctl enable --now ocserv.service
 systemctl restart ocserv.service
 systemctl enable --now ocserv-panel.service
+systemctl enable --now ocserv-panel-expire.timer
 
 echo
 echo "Installation complete."
