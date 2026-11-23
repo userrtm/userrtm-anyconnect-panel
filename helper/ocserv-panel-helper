@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Narrow root helper used by the web panel. Never accepts shell commands."""
+"""Narrow root helper for ocserv. It accepts typed operations, never shell commands."""
 import ipaddress
 import json
 import os
@@ -7,133 +7,322 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
+from pathlib import Path
 
-CONFIG = "/etc/ocserv/ocserv.conf"
-PASSWD = "/etc/ocserv/ocpasswd"
-USERNAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
+CONFIG = Path('/etc/ocserv/ocserv.conf')
+PASSWD = Path('/etc/ocserv/ocpasswd')
+META = Path('/etc/ocserv-panel/users.json')
+USERNAME_RE = re.compile(r'^[A-Za-z0-9_-]{1,32}$')
+MAX_EXPIRY = 10 * 365 * 86400
 
 
-def run(args, input_text=None):
-    return subprocess.run(args, input=input_text, text=True, capture_output=True, timeout=30)
+def run(args, input_text=None, timeout=30):
+    return subprocess.run(args, input=input_text, text=True, capture_output=True, timeout=timeout)
+
+
+def _user_lines():
+    try:
+        return [line.rstrip('\n') for line in PASSWD.read_text(encoding='utf-8').splitlines() if line and ':' in line]
+    except FileNotFoundError:
+        return []
 
 
 def users_list():
-    users = []
+    return {line.split(':', 1)[0]: line for line in _user_lines()}
+
+
+def load_meta():
     try:
-        with open(PASSWD, encoding="utf-8") as f:
-            for line in f:
-                line = line.rstrip("\n")
-                if line and ":" in line:
-                    users.append(line.split(":", 1)[0])
+        data = json.loads(META.read_text(encoding='utf-8'))
     except FileNotFoundError:
-        pass
-    return sorted(set(users), key=str.casefold)
+        data = {'users': {}}
+    if not isinstance(data, dict) or not isinstance(data.get('users'), dict):
+        raise RuntimeError('Customer metadata is invalid; restore /etc/ocserv-panel/users.json from backup.')
+    return data
+
+
+def save_meta(data):
+    META.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix='.users.', dir=str(META.parent), text=True)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.write('\n')
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(temp_name, 0o600)
+        os.replace(temp_name, META)
+    finally:
+        try:
+            os.unlink(temp_name)
+        except FileNotFoundError:
+            pass
+
+
+def set_password(username, password):
+    p = run(['ocpasswd', '-c', str(PASSWD), username], password + '\n' + password + '\n')
+    if p.returncode:
+        raise RuntimeError((p.stderr or p.stdout or 'Could not set VPN password.').strip())
+    os.chmod(PASSWD, 0o600)
+
+
+def remove_password(username):
+    p = run(['ocpasswd', '-c', str(PASSWD), '-d', username])
+    if p.returncode:
+        raise RuntimeError((p.stderr or p.stdout or 'Could not remove VPN password.').strip())
+    os.chmod(PASSWD, 0o600)
+
+
+def lock_password(username, locked):
+    flag = '-l' if locked else '-u'
+    p = run(['ocpasswd', '-c', str(PASSWD), flag, username])
+    if p.returncode:
+        raise RuntimeError((p.stderr or p.stdout or 'Could not update the customer lock.').strip())
+    os.chmod(PASSWD, 0o600)
+
+
+def disable_entry(username, meta, status):
+    entries = users_list()
+    if username not in entries:
+        raise RuntimeError('Customer password entry is missing.')
+    record = meta['users'].setdefault(username, {})
+    lock_password(username, True)
+    record['status'] = status
+    record['updated_at'] = int(time.time())
+
+
+def enable_entry(username, meta):
+    record = meta['users'].get(username, {})
+    if record.get('expires_at') and int(record['expires_at']) <= int(time.time()):
+        raise ValueError('This account has expired. Extend its expiry before enabling it.')
+    if username not in users_list():
+        raise RuntimeError('Customer password entry is missing; set a new password before enabling this account.')
+    lock_password(username, False)
+    record['status'] = 'active'
+    record['updated_at'] = int(time.time())
+
+
+def expire_users(meta=None):
+    meta = meta or load_meta()
+    now = int(time.time())
+    changed = []
+    for username, record in list(meta['users'].items()):
+        expires = record.get('expires_at')
+        if record.get('status', 'active') == 'active' and expires and int(expires) <= now:
+            disable_entry(username, meta, 'expired')
+            changed.append(username)
+    if changed:
+        save_meta(meta)
+    return changed
 
 
 def get_settings():
-    with open(CONFIG, encoding="utf-8") as f:
-        content = f.read()
-    def one(pattern, default=""):
+    content = CONFIG.read_text(encoding='utf-8')
+    def one(pattern, default=''):
         m = re.search(pattern, content, re.M)
         return m.group(1).strip() if m else default
     return {
-        "domain": one(r"^server-cert\s*=\s*/etc/letsencrypt/live/([^/]+)/fullchain\.pem$"),
-        "port": one(r"^tcp-port\s*=\s*(\d+)$", "443"),
-        "dns": re.findall(r"^dns\s*=\s*(\S+)\s*$", content, re.M),
+        'domain': one(r'^\s*server-cert\s*=\s*/etc/letsencrypt/live/([^/]+)/fullchain\.pem\s*$'),
+        'port': one(r'^\s*tcp-port\s*=\s*(\d+)\s*$', '443'),
+        'dns': re.findall(r'^\s*dns\s*=\s*(\S+)\s*$', content, re.M),
     }
 
 
 def service_status():
-    p = run(["systemctl", "is-active", "ocserv"])
-    active = p.stdout.strip() or "unknown"
-    q = run(["systemctl", "show", "ocserv", "--property=ActiveEnterTimestamp", "--value"])
-    return {"active": active, "since": q.stdout.strip()}
+    p = run(['systemctl', 'is-active', 'ocserv'])
+    active = p.stdout.strip() or 'unknown'
+    q = run(['systemctl', 'show', 'ocserv', '--property=ActiveEnterTimestamp', '--value'])
+    return {'active': active, 'since': q.stdout.strip()}
 
 
 def config_check():
-    p = run(["ocserv", "-t", "-c", CONFIG])
+    p = run(['ocserv', '-t', '-c', str(CONFIG)])
     if p.returncode:
-        raise RuntimeError((p.stderr or p.stdout or "ocserv config check failed").strip())
-    return "Configuration is valid."
+        raise RuntimeError((p.stderr or p.stdout or 'ocserv config check failed').strip())
+    return 'Configuration is valid.'
+
+
+def validate_username(username):
+    if not isinstance(username, str) or not USERNAME_RE.fullmatch(username):
+        raise ValueError('Username must use letters, numbers, underscore or hyphen (1–32 chars).')
+
+
+def validate_password(password):
+    if not isinstance(password, str) or len(password) < 10 or len(password) > 128 or '\n' in password or '\r' in password:
+        raise ValueError('Password must be 10–128 characters and cannot contain line breaks.')
+
+
+def expiry_from_days(days):
+    if days is None or days == '':
+        return None
+    try:
+        days = int(days)
+    except (TypeError, ValueError):
+        raise ValueError('Expiry must be a number of days or unlimited.')
+    if not 1 <= days <= 3650:
+        raise ValueError('Expiry must be between 1 and 3650 days.')
+    return int(time.time()) + days * 86400
+
+
+def snapshot(meta):
+    active_entries = users_list()
+    users = []
+    names = set(active_entries) | set(meta['users'])
+    for username in sorted(names, key=str.casefold):
+        record = meta['users'].get(username, {})
+        status = record.get('status', 'active' if username in active_entries else 'disabled')
+        if status not in ('active', 'disabled', 'expired'):
+            status = 'active' if username in active_entries else 'disabled'
+            record['status'] = status
+        users.append({
+            'username': username,
+            'status': status,
+            'expires_at': record.get('expires_at'),
+            'created_at': record.get('created_at'),
+        })
+    return users
 
 
 def action(req):
-    op = req.get("op")
-    if op == "state":
-        return {"users": users_list(), "settings": get_settings(), "service": service_status(),
-                "logs": run(["journalctl", "-u", "ocserv", "-n", "25", "--no-pager", "-o", "cat"]).stdout}
-    if op == "add_user":
-        username, password = req.get("username", ""), req.get("password", "")
-        if not USERNAME_RE.fullmatch(username):
-            raise ValueError("Username must use letters, numbers, underscore or hyphen (1–32 chars).")
-        if len(password) < 10 or len(password) > 128 or "\n" in password or "\r" in password:
-            raise ValueError("Password must be 10–128 characters and cannot contain line breaks.")
-        p = run(["ocpasswd", "-c", PASSWD, username], password + "\n" + password + "\n")
-        if p.returncode:
-            raise RuntimeError((p.stderr or p.stdout or "Could not create user.").strip())
-        os.chmod(PASSWD, 0o600)
-        return {"message": "Customer added."}
-    if op == "delete_user":
-        username = req.get("username", "")
-        if not USERNAME_RE.fullmatch(username):
-            raise ValueError("Invalid username.")
-        if username not in users_list():
-            raise ValueError("Customer not found.")
-        p = run(["ocpasswd", "-d", "-c", PASSWD, username])
-        if p.returncode:
-            raise RuntimeError((p.stderr or p.stdout or "Could not remove user.").strip())
-        return {"message": "Customer removed."}
-    if op == "save_dns":
-        dns_values = req.get("dns", [])
-        if not isinstance(dns_values, list) or not 1 <= len(dns_values) <= 4:
-            raise ValueError("Enter between one and four DNS server IPs.")
+    op = req.get('op')
+    if op == 'state':
+        meta = load_meta()
+        expire_users(meta)
+        return {
+            'users': snapshot(meta),
+            'settings': get_settings(),
+            'service': service_status(),
+            'logs': run(['journalctl', '-u', 'ocserv', '-n', '40', '--no-pager', '-o', 'cat']).stdout,
+        }
+    if op == 'profile':
+        settings = get_settings()
+        host = settings['domain']
+        if not host or not re.fullmatch(r'[A-Za-z0-9.-]+', host):
+            raise RuntimeError('Could not determine the VPN hostname from the TLS certificate setting.')
+        return {'host': host, 'port': settings['port']}
+    if op == 'add_user':
+        username, password = req.get('username', ''), req.get('password', '')
+        validate_username(username)
+        validate_password(password)
+        meta = load_meta()
+        if username in users_list() or username in meta['users']:
+            raise ValueError('Customer already exists. Use password reset or re-enable instead.')
+        set_password(username, password)
+        meta['users'][username] = {'status': 'active', 'expires_at': expiry_from_days(req.get('days')), 'created_at': int(time.time())}
         try:
-            dns_values = [str(ipaddress.ip_address(x.strip())) for x in dns_values if isinstance(x, str)]
+            save_meta(meta)
+        except Exception:
+            remove_password(username)
+            raise
+        return {'message': 'Customer added.'}
+    if op == 'delete_user':
+        username = req.get('username', '')
+        validate_username(username)
+        meta = load_meta()
+        if username in users_list():
+            remove_password(username)
+        elif username not in meta['users']:
+            raise ValueError('Customer not found.')
+        meta['users'].pop(username, None)
+        save_meta(meta)
+        return {'message': 'Customer permanently removed.'}
+    if op in ('disable_user', 'enable_user', 'set_expiry', 'reset_password'):
+        username = req.get('username', '')
+        validate_username(username)
+        meta = load_meta()
+        record = meta['users'].setdefault(username, {'status': 'active', 'created_at': int(time.time())})
+        exists = username in users_list()
+        if not exists:
+            raise ValueError('Customer not found.')
+        if op == 'disable_user':
+            if record.get('status', 'active') != 'active':
+                raise ValueError('Customer is already disabled.')
+            disable_entry(username, meta, 'disabled')
+        elif op == 'enable_user':
+            if record.get('status', 'active') == 'active':
+                raise ValueError('Customer is already active.')
+            enable_entry(username, meta)
+        elif op == 'set_expiry':
+            previous = record.get('status', 'active')
+            record['expires_at'] = expiry_from_days(req.get('days'))
+            if previous == 'expired' and (record['expires_at'] is None or record['expires_at'] > int(time.time())):
+                enable_entry(username, meta)
+        else:
+            password = req.get('password', '')
+            validate_password(password)
+            was_disabled = record.get('status', 'active') != 'active'
+            if was_disabled:
+                lock_password(username, False)
+            try:
+                set_password(username, password)
+            finally:
+                if was_disabled:
+                    lock_password(username, True)
+        record['updated_at'] = int(time.time())
+        save_meta(meta)
+        return {'message': 'Customer updated.'}
+    if op == 'expire':
+        return {'expired': expire_users()}
+    if op == 'save_dns':
+        dns_values = req.get('dns', [])
+        if not isinstance(dns_values, list) or not 1 <= len(dns_values) <= 4:
+            raise ValueError('Enter between one and four DNS server IPs.')
+        if any(not isinstance(x, str) for x in dns_values):
+            raise ValueError('DNS entries must be valid IPv4 or IPv6 addresses.')
+        try:
+            dns_values = [str(ipaddress.ip_address(x.strip())) for x in dns_values]
         except ValueError:
-            raise ValueError("DNS entries must be valid IPv4 or IPv6 addresses.")
+            raise ValueError('DNS entries must be valid IPv4 or IPv6 addresses.')
         if not dns_values:
-            raise ValueError("At least one DNS server is required.")
-        with open(CONFIG, encoding="utf-8") as f:
-            lines = f.readlines()
-        backup = CONFIG + ".backup." + time.strftime("%Y%m%d%H%M%S")
+            raise ValueError('At least one DNS server is required.')
+        lines = CONFIG.read_text(encoding='utf-8').splitlines(keepends=True)
+        backup = str(CONFIG) + '.backup.' + time.strftime('%Y%m%d%H%M%S')
         shutil.copy2(CONFIG, backup)
-        lines = [line for line in lines if not re.match(r"^\s*dns\s*=", line)]
-        insert_at = next((i for i, line in enumerate(lines) if re.match(r"^\s*route\s*=", line)), len(lines))
-        lines[insert_at:insert_at] = [f"dns = {ip}\n" for ip in dns_values]
-        with open(CONFIG, "w", encoding="utf-8") as f:
-            f.writelines(lines)
+        lines = [line for line in lines if not re.match(r'^\s*dns\s*=', line)]
+        insert_at = next((i for i, line in enumerate(lines) if re.match(r'^\s*route\s*=', line)), len(lines))
+        lines[insert_at:insert_at] = [f'dns = {ip}\n' for ip in dns_values]
+        CONFIG.write_text(''.join(lines), encoding='utf-8')
         try:
             config_check()
-            p = run(["systemctl", "restart", "ocserv"])
+            p = run(['systemctl', 'restart', 'ocserv'])
             if p.returncode:
-                raise RuntimeError((p.stderr or p.stdout or "ocserv restart failed").strip())
+                raise RuntimeError((p.stderr or p.stdout or 'ocserv restart failed').strip())
         except Exception:
             shutil.copy2(backup, CONFIG)
-            run(["systemctl", "restart", "ocserv"])
+            run(['systemctl', 'restart', 'ocserv'])
             raise
-        return {"message": "DNS settings saved and ocserv restarted."}
-    if op == "restart":
+        return {'message': 'DNS settings saved and ocserv restarted.'}
+    if op == 'restart':
         config_check()
-        p = run(["systemctl", "restart", "ocserv"])
+        p = run(['systemctl', 'restart', 'ocserv'])
         if p.returncode:
-            raise RuntimeError((p.stderr or p.stdout or "ocserv restart failed").strip())
-        return {"message": "ocserv restarted."}
-    if op == "check":
-        return {"message": config_check()}
-    raise ValueError("Unsupported operation.")
+            raise RuntimeError((p.stderr or p.stdout or 'ocserv restart failed').strip())
+        return {'message': 'ocserv restarted.'}
+    if op == 'check':
+        return {'message': config_check()}
+    raise ValueError('Unsupported operation.')
 
 
 def main():
     if os.geteuid() != 0:
-        raise RuntimeError("Helper must run as root.")
+        raise RuntimeError('Helper must run as root.')
+    if sys.argv[1:] == ['--expire']:
+        print(json.dumps({'ok': True, 'data': {'expired': expire_users()}}))
+        return
+    if sys.argv[1:]:
+        raise ValueError('Unsupported helper argument.')
     req = json.load(sys.stdin)
+    if not isinstance(req, dict):
+        raise ValueError('Request must be a JSON object.')
     result = action(req)
-    print(json.dumps({"ok": True, "data": result}))
+    print(json.dumps({'ok': True, 'data': result}))
 
 
-try:
-    main()
-except Exception as exc:
-    print(json.dumps({"ok": False, "error": str(exc)}))
-    sys.exit(1)
+if __name__ == '__main__':
+    try:
+        main()
+    except Exception as exc:
+        print(json.dumps({'ok': False, 'error': str(exc)}))
+        sys.exit(1)
