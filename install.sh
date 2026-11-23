@@ -5,7 +5,7 @@ REPO="userrtm/userrtm-anyconnect-panel"
 BRANCH="main"
 
 if [[ $EUID -ne 0 ]]; then
-  echo "Run with root privileges, for example: curl -fsSL https://raw.githubusercontent.com/${REPO}/${BRANCH}/install.sh | sudo bash"
+  echo "Run as root, then execute: bash <(curl -fsSL https://raw.githubusercontent.com/${REPO}/${BRANCH}/install.sh)"
   exit 1
 fi
 

@@ -4,10 +4,10 @@ Ubuntu üzerinde `ocserv` hesaplarını ve temel sunucu ayarlarını yönetmek i
 
 ## Kurulum
 
-Ubuntu VPS'te root yetkisiyle bu tek komutu çalıştır:
+Ubuntu VPS'te root hesabıyla bu tek komutu çalıştır. Bu biçim, kurulum sorularının SSH terminalinden yanıtlanmasını sağlar:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/userrtm/userrtm-anyconnect-panel/main/install.sh | sudo bash
+bash <(curl -fsSL https://raw.githubusercontent.com/userrtm/userrtm-anyconnect-panel/main/install.sh)
 ```
 
 Kurulum betiği GitHub'daki kaynak paketini geçici bir klasöre indirir ve kurulum sihirbazını başlatır. Alan adını, Let's Encrypt e-posta adresini, ilk VPN kullanıcı hesabını ve panel yöneticisini sorar. Panel `https://ALAN_ADIN:8443` adresinden açılır.
