@@ -1,3 +1,4 @@
+"""Web administration UI for an ocserv server."""
 import json
 import os
 import re
@@ -5,39 +6,49 @@ import secrets
 import sqlite3
 import subprocess
 import time
+import xml.etree.ElementTree as ET
 from functools import wraps
 from pathlib import Path
 
-from flask import Flask, jsonify, redirect, render_template, request, session, url_for
+from flask import Flask, Response, jsonify, redirect, render_template, request, session, url_for
 from werkzeug.security import check_password_hash, generate_password_hash
 
-BASE = Path(__file__).resolve().parent
 DB_PATH = Path(os.environ.get("PANEL_DB", "/var/lib/ocserv-panel/panel.db"))
 HELPER = "/usr/local/sbin/ocserv-panel-helper"
-LOGIN_TRIES = {}
+USERNAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
 
 app = Flask(__name__)
 secret_path = Path("/etc/ocserv-panel/secret_key")
 app.secret_key = secret_path.read_text().strip() if secret_path.exists() else os.environ.get("PANEL_SECRET_KEY")
 if not app.secret_key:
     raise RuntimeError("Set /etc/ocserv-panel/secret_key before starting the panel.")
-app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SECURE=True, SESSION_COOKIE_SAMESITE="Strict", PERMANENT_SESSION_LIFETIME=3600)
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SECURE=True,
+    SESSION_COOKIE_SAMESITE="Strict",
+    PERMANENT_SESSION_LIFETIME=3600,
+    MAX_CONTENT_LENGTH=16 * 1024,
+)
 
 
 def db():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(DB_PATH)
+    con = sqlite3.connect(DB_PATH, timeout=10)
     con.row_factory = sqlite3.Row
     con.execute("CREATE TABLE IF NOT EXISTS admins (username TEXT PRIMARY KEY, password_hash TEXT NOT NULL)")
+    con.execute("CREATE TABLE IF NOT EXISTS login_attempts (ip TEXT PRIMARY KEY, failures INTEGER NOT NULL, locked_until REAL NOT NULL, updated_at REAL NOT NULL)")
     con.commit()
     return con
 
 
 def helper(payload):
-    p = subprocess.run(["sudo", "-n", HELPER], input=json.dumps(payload), text=True, capture_output=True, timeout=45)
+    p = subprocess.run(
+        ["sudo", "-n", HELPER], input=json.dumps(payload), text=True,
+        capture_output=True, timeout=45,
+    )
     try:
         data = json.loads(p.stdout)
-    except Exception:
+    except (ValueError, TypeError):
         raise RuntimeError((p.stderr or p.stdout or "The privileged helper returned an invalid response.").strip())
     if p.returncode or not data.get("ok"):
         raise RuntimeError(data.get("error", "Operation failed."))
@@ -63,6 +74,18 @@ def protect_posts():
             return jsonify(error="Invalid request token. Reload the page and try again."), 400
 
 
+@app.after_request
+def security_headers(response):
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    response.headers.setdefault("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; base-uri 'self'; frame-ancestors 'none'; form-action 'self'")
+    if request.is_secure:
+        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000")
+    return response
+
+
 def login_required(fn):
     @wraps(fn)
     def wrapped(*args, **kwargs):
@@ -70,6 +93,20 @@ def login_required(fn):
             return jsonify(error="Please sign in again."), 401
         return fn(*args, **kwargs)
     return wrapped
+
+
+def json_body():
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        raise ValueError("Request body must be a JSON object.")
+    return body
+
+
+def api_operation(payload):
+    try:
+        return jsonify(helper(payload))
+    except (RuntimeError, ValueError, OSError, subprocess.TimeoutExpired) as exc:
+        return jsonify(error=str(exc)), 400
 
 
 @app.get("/")
@@ -81,32 +118,59 @@ def index():
 
 @app.get("/login")
 def login():
+    if session.get("admin"):
+        return redirect(url_for("index"))
     return render_template("login.html", csrf=csrf_token())
+
+
+@app.get("/profile.xml")
+def client_profile():
+    """Serve a minimal Cisco Secure Client server-list profile for URI import."""
+    try:
+        details = helper({"op": "profile"})
+        namespace = "http://schemas.xmlsoap.org/encoding/"
+        ET.register_namespace("", namespace)
+        root = ET.Element(f"{{{namespace}}}AnyConnectProfile")
+        servers = ET.SubElement(root, f"{{{namespace}}}ServerList")
+        entry = ET.SubElement(servers, f"{{{namespace}}}HostEntry")
+        ET.SubElement(entry, f"{{{namespace}}}HostName").text = "UserrTM Servers"
+        host = details["host"]
+        port = str(details.get("port", "443"))
+        ET.SubElement(entry, f"{{{namespace}}}HostAddress").text = host if port == "443" else f"{host}:{port}"
+        body = b'<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(root, encoding="utf-8")
+        return Response(body, mimetype="application/xml", headers={"Cache-Control": "no-store", "Content-Disposition": 'inline; filename="UserrTM-AnyConnect.xml"'})
+    except (RuntimeError, KeyError, TypeError, subprocess.TimeoutExpired) as exc:
+        return Response(str(exc), status=503, mimetype="text/plain", headers={"Cache-Control": "no-store"})
 
 
 @app.post("/login")
 def login_post():
+    now = time.time()
     ip = request.remote_addr or "unknown"
-    current = LOGIN_TRIES.get(ip, {"n": 0, "until": 0})
-    if current["until"] > time.time():
-        return render_template("login.html", csrf=csrf_token(), error="Too many attempts. Try again later."), 429
-    username = request.form.get("username", "")[:64]
-    password = request.form.get("password", "")[:256]
     con = db()
+    con.execute("DELETE FROM login_attempts WHERE updated_at < ?", (now - 86400,))
+    state = con.execute("SELECT failures,locked_until FROM login_attempts WHERE ip=?", (ip,)).fetchone()
+    if state and state["locked_until"] > now:
+        con.close()
+        return render_template("login.html", csrf=csrf_token(), error="Çok fazla deneme. 15 dakika sonra tekrar deneyin."), 429
+    username = request.form.get("username", "")[:32]
+    password = request.form.get("password", "")[:256]
     row = con.execute("SELECT username,password_hash FROM admins WHERE username=?", (username,)).fetchone()
-    con.close()
     if row and check_password_hash(row["password_hash"], password):
-        LOGIN_TRIES.pop(ip, None)
+        con.execute("DELETE FROM login_attempts WHERE ip=?", (ip,))
+        con.commit()
+        con.close()
         session.clear()
         session["admin"] = username
-        csrf_token()
+        session["csrf"] = secrets.token_urlsafe(32)
         session.permanent = True
         return redirect(url_for("index"))
-    current["n"] += 1
-    if current["n"] >= 5:
-        current.update(n=0, until=time.time() + 900)
-    LOGIN_TRIES[ip] = current
-    return render_template("login.html", csrf=csrf_token(), error="Username or password is incorrect."), 401
+    failures = (state["failures"] if state else 0) + 1
+    locked_until = now + 900 if failures >= 5 else 0
+    con.execute("INSERT INTO login_attempts(ip,failures,locked_until,updated_at) VALUES(?,?,?,?) ON CONFLICT(ip) DO UPDATE SET failures=excluded.failures,locked_until=excluded.locked_until,updated_at=excluded.updated_at", (ip, 0 if locked_until else failures, locked_until, now))
+    con.commit()
+    con.close()
+    return render_template("login.html", csrf=csrf_token(), error="Kullanıcı adı veya şifre yanlış."), 401
 
 
 @app.post("/logout")
@@ -118,28 +182,89 @@ def logout():
 @app.get("/api/state")
 @login_required
 def api_state():
-    try:
-        return jsonify(helper({"op": "state"}))
-    except Exception as exc:
-        return jsonify(error=str(exc)), 500
+    return api_operation({"op": "state"})
 
 
 @app.post("/api/users")
 @login_required
 def api_add_user():
     try:
-        body = request.get_json(force=True)
-        return jsonify(helper({"op": "add_user", "username": body.get("username", ""), "password": body.get("password", "")}))
-    except Exception as exc:
+        body = json_body()
+        username = body.get("username", "")
+        if not isinstance(username, str) or not USERNAME_RE.fullmatch(username):
+            raise ValueError("Kullanıcı adı 1–32 karakter olmalı; harf, rakam, _ ve - kullanın.")
+        password = body.get("password", "")
+        if not isinstance(password, str) or len(password) < 10 or len(password) > 128:
+            raise ValueError("VPN şifresi 10–128 karakter olmalı.")
+        return api_operation({"op": "add_user", "username": username, "password": password, "days": body.get("days")})
+    except ValueError as exc:
         return jsonify(error=str(exc)), 400
 
 
 @app.delete("/api/users/<username>")
 @login_required
 def api_delete_user(username):
+    return api_operation({"op": "delete_user", "username": username})
+
+
+@app.post("/api/users/<username>/status")
+@login_required
+def api_user_status(username):
     try:
-        return jsonify(helper({"op": "delete_user", "username": username}))
-    except Exception as exc:
+        body = json_body()
+        if not isinstance(body.get("active"), bool):
+            raise ValueError("active alanı true veya false olmalı.")
+        return api_operation({"op": "enable_user" if body["active"] else "disable_user", "username": username})
+    except ValueError as exc:
+        return jsonify(error=str(exc)), 400
+
+
+@app.post("/api/users/<username>/expiry")
+@login_required
+def api_user_expiry(username):
+    try:
+        body = json_body()
+        days = body.get("days")
+        if days is not None and days != "" and (not isinstance(days, int) or isinstance(days, bool) or not 1 <= days <= 3650):
+            raise ValueError("Süre 1–3650 gün arasında veya sınırsız olmalı.")
+        return api_operation({"op": "set_expiry", "username": username, "days": days})
+    except ValueError as exc:
+        return jsonify(error=str(exc)), 400
+
+
+@app.post("/api/users/<username>/password")
+@login_required
+def api_user_password(username):
+    try:
+        body = json_body()
+        password = body.get("password", "")
+        if not isinstance(password, str) or len(password) < 10 or len(password) > 128:
+            raise ValueError("VPN şifresi 10–128 karakter olmalı.")
+        return api_operation({"op": "reset_password", "username": username, "password": password})
+    except ValueError as exc:
+        return jsonify(error=str(exc)), 400
+
+
+@app.post("/api/admin/password")
+@login_required
+def api_admin_password():
+    try:
+        body = json_body()
+        current, new = body.get("current", ""), body.get("new", "")
+        if not isinstance(current, str) or not isinstance(new, str) or len(new) < 12 or len(new) > 256:
+            raise ValueError("Yeni panel şifresi 12–256 karakter olmalı.")
+        con = db()
+        try:
+            row = con.execute("SELECT password_hash FROM admins WHERE username=?", (session["admin"],)).fetchone()
+            if not row or not check_password_hash(row["password_hash"], current):
+                raise ValueError("Mevcut panel şifresi hatalı.")
+            con.execute("UPDATE admins SET password_hash=? WHERE username=?", (generate_password_hash(new), session["admin"]))
+            con.commit()
+        finally:
+            con.close()
+        session.clear()
+        return jsonify(message="Şifre değiştirildi. Güvenlik için yeniden giriş yapın.", logout=True)
+    except ValueError as exc:
         return jsonify(error=str(exc)), 400
 
 
@@ -147,28 +272,22 @@ def api_delete_user(username):
 @login_required
 def api_dns():
     try:
-        body = request.get_json(force=True)
-        return jsonify(helper({"op": "save_dns", "dns": body.get("dns", [])}))
-    except Exception as exc:
+        body = json_body()
+        return api_operation({"op": "save_dns", "dns": body.get("dns", [])})
+    except ValueError as exc:
         return jsonify(error=str(exc)), 400
 
 
 @app.post("/api/restart")
 @login_required
 def api_restart():
-    try:
-        return jsonify(helper({"op": "restart"}))
-    except Exception as exc:
-        return jsonify(error=str(exc)), 400
+    return api_operation({"op": "restart"})
 
 
 @app.post("/api/check")
 @login_required
 def api_check():
-    try:
-        return jsonify(helper({"op": "check"}))
-    except Exception as exc:
-        return jsonify(error=str(exc)), 400
+    return api_operation({"op": "check"})
 
 
 def bootstrap():
@@ -180,9 +299,11 @@ def bootstrap():
     if len(password) < 12:
         raise SystemExit("Password must contain at least 12 characters.")
     con = db()
-    con.execute("INSERT OR REPLACE INTO admins(username,password_hash) VALUES(?,?)", (username, generate_password_hash(password)))
-    con.commit()
-    con.close()
+    try:
+        con.execute("INSERT INTO admins(username,password_hash) VALUES(?,?) ON CONFLICT(username) DO UPDATE SET password_hash=excluded.password_hash", (username, generate_password_hash(password)))
+        con.commit()
+    finally:
+        con.close()
     print("Admin account saved.")
 
 

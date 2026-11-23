@@ -1,28 +1,48 @@
-# OpenConnect / AnyConnect Sunucu Paneli
+# UserrTM AnyConnect Panel
 
-Ubuntu üzerinde `ocserv` hesaplarını ve temel sunucu ayarlarını yönetmek için web paneli. İlk sürümde yönetici girişi, müşteri ekleme/silme, servis durumu ve yeniden başlatma, DNS ayarları, son kayıtlar ve açık/koyu tema bulunur.
+Ubuntu VPS üzerinde OpenConnect (`ocserv`) sunucusunu ve VPN müşteri hesaplarını web panelinden yönetir. Yönetim ekranı masaüstü ve telefonda çalışır; açık ve koyu görünüm sunar.
 
-## Kurulum
+## Tek komutla kurulum
 
-Ubuntu VPS'te root hesabıyla bu tek komutu çalıştır. Bu biçim, kurulum sorularının SSH terminalinden yanıtlanmasını sağlar:
+Ubuntu VPS'e root olarak SSH ile bağlan ve şu komutu çalıştır:
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/userrtm/userrtm-anyconnect-panel/main/install.sh)
 ```
 
-Kurulum betiği GitHub'daki kaynak paketini geçici bir klasöre indirir ve kurulum sihirbazını başlatır. Alan adını, Let's Encrypt e-posta adresini, ilk VPN kullanıcı hesabını ve panel yöneticisini sorar. Panel `https://ALAN_ADIN:8443` adresinden açılır.
+Kurulum alan adını, Let's Encrypt e-posta adresini ve isteğe bağlı ilk VPN müşterisini sorar. Sonra panel yöneticisi için kullanıcı adı ve güçlü bir parola belirletir. İşlem tamamlanınca panel adresini terminalde gösterir:
 
-> GitHub deposunun herkese açık olması gerekir ki VPS oturum açmadan `curl` ile dosyayı indirebilsin.
+```text
+https://ALAN_ADIN:8443
+```
 
-## Gereksinimler
+Alan adının A kaydı VPS IP'sine yönlenmelidir. VPS sağlayıcısının güvenlik duvarında 80/TCP (sertifika), 443/TCP ve 443/UDP (VPN), 8443/TCP (web paneli) açık olmalıdır. Kurulum sunucuya doğrudan `ocserv` ve panel servislerini yükler.
 
-- Ubuntu 24.04 veya daha yeni
-- VPS IP adresine yönlenen alan adı A kaydı
-- Dış güvenlik duvarında 80/TCP, 443/TCP, 443/UDP ve 8443/TCP erişimi
-- Root SSH erişimi
+## Panel özellikleri
 
-Panel genel bir terminal açmaz. Root işlemleri sadece izinleri sınırlandırılmış `ocserv-panel-helper` üzerinden yürütülür.
+- VPN müşterisi ekleme, kalıcı silme, geçici olarak devre dışı bırakma ve yeniden etkinleştirme
+- 1–3650 gün süreli hesap veya sınırsız hesap oluşturma; abonelik bitişini değiştirme
+- Süresi dolan hesabı otomatik devre dışı bırakma (beş dakikada bir denetim)
+- Müşteri VPN şifresini yenileme
+- `ocserv` servis durumu, yapılandırma kontrolü, yeniden başlatma ve son günlük kayıtları
+- DNS sunucularını değiştirme; değişiklikten önce yedek alma ve yapılandırma doğrulama
+- Yönetici panel parolasını değiştirme
+- Cisco Secure Client için sunucu listesini içeren XML profili ve URI ile içe aktarma adresi
+- Açık/koyu tema ve telefon ekranına uyumlu görünüm
 
-## Güvenlik ve sınırlamalar
+Cisco Secure Client uygulamasında **Profile Management → Import Profile → Network Location (URI)** seçeneğini aç ve panelde gösterilen `https://ALAN_ADIN:8443/profile.xml` adresini gir. Profil VPN sunucu adresini ekler; müşteri kullanıcı adı ve şifresi yine uygulamada ayrıca girilir.
 
-Gerçek parolaları, özel anahtarları, `.env` dosyalarını veya `/etc/letsencrypt` içeriğini depoya yükleme. DNS değişikliklerinden önce yapılandırmanın yedeği alınır ve `ocserv -t` ile kontrol edilir. Bu ilk sürümde süre sonu takibi, bayi/alt yönetici rolleri ve kullanım kotası yönetimi bulunmuyor.
+## Güvenlik ve sınırlar
+
+Panel root olarak web isteği çalıştırmaz. Ayrı servis kullanıcısı, CSRF koruması ve yalnızca tanımlı `ocserv-panel-helper` işlemlerine izin veren sudo kuralı kullanır. VPN parola dosyası ve müşteri durumu root tarafından korunur. Panel TLS'i Let's Encrypt ile sağlanır; sertifika yenilendiğinde VPN ve panel servisleri yeniden başlatılır.
+
+Bu sürüm kullanıcı kotası, cihaz/HWID sınırı, ödeme alma, bayi/alt yönetici rolleri, uygulama içinden otomatik abonelik ödemesi veya farklı sunucuları tek merkezden yönetme özelliklerini içermez. Paneli yalnızca güvendiğin yöneticilerle paylaş; 8443/TCP erişimini sağlayıcı güvenlik duvarında kısıtlayabiliyorsan yönetici IP'lerine sınırla.
+
+## Geliştirme ve kontroller
+
+```bash
+python3 -m unittest discover -s tests -v
+python3 -m py_compile app.py helper/ocserv-panel-helper
+bash -n install.sh scripts/install-core.sh
+node --check static/app.js
+```
