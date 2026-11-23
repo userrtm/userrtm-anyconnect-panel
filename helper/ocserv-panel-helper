@@ -1,0 +1,139 @@
+#!/usr/bin/env python3
+"""Narrow root helper used by the web panel. Never accepts shell commands."""
+import ipaddress
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+
+CONFIG = "/etc/ocserv/ocserv.conf"
+PASSWD = "/etc/ocserv/ocpasswd"
+USERNAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
+
+
+def run(args, input_text=None):
+    return subprocess.run(args, input=input_text, text=True, capture_output=True, timeout=30)
+
+
+def users_list():
+    users = []
+    try:
+        with open(PASSWD, encoding="utf-8") as f:
+            for line in f:
+                line = line.rstrip("\n")
+                if line and ":" in line:
+                    users.append(line.split(":", 1)[0])
+    except FileNotFoundError:
+        pass
+    return sorted(set(users), key=str.casefold)
+
+
+def get_settings():
+    with open(CONFIG, encoding="utf-8") as f:
+        content = f.read()
+    def one(pattern, default=""):
+        m = re.search(pattern, content, re.M)
+        return m.group(1).strip() if m else default
+    return {
+        "domain": one(r"^server-cert\s*=\s*/etc/letsencrypt/live/([^/]+)/fullchain\.pem$"),
+        "port": one(r"^tcp-port\s*=\s*(\d+)$", "443"),
+        "dns": re.findall(r"^dns\s*=\s*(\S+)\s*$", content, re.M),
+    }
+
+
+def service_status():
+    p = run(["systemctl", "is-active", "ocserv"])
+    active = p.stdout.strip() or "unknown"
+    q = run(["systemctl", "show", "ocserv", "--property=ActiveEnterTimestamp", "--value"])
+    return {"active": active, "since": q.stdout.strip()}
+
+
+def config_check():
+    p = run(["ocserv", "-t", "-c", CONFIG])
+    if p.returncode:
+        raise RuntimeError((p.stderr or p.stdout or "ocserv config check failed").strip())
+    return "Configuration is valid."
+
+
+def action(req):
+    op = req.get("op")
+    if op == "state":
+        return {"users": users_list(), "settings": get_settings(), "service": service_status(),
+                "logs": run(["journalctl", "-u", "ocserv", "-n", "25", "--no-pager", "-o", "cat"]).stdout}
+    if op == "add_user":
+        username, password = req.get("username", ""), req.get("password", "")
+        if not USERNAME_RE.fullmatch(username):
+            raise ValueError("Username must use letters, numbers, underscore or hyphen (1–32 chars).")
+        if len(password) < 10 or len(password) > 128 or "\n" in password or "\r" in password:
+            raise ValueError("Password must be 10–128 characters and cannot contain line breaks.")
+        p = run(["ocpasswd", "-c", PASSWD, username], password + "\n" + password + "\n")
+        if p.returncode:
+            raise RuntimeError((p.stderr or p.stdout or "Could not create user.").strip())
+        os.chmod(PASSWD, 0o600)
+        return {"message": "Customer added."}
+    if op == "delete_user":
+        username = req.get("username", "")
+        if not USERNAME_RE.fullmatch(username):
+            raise ValueError("Invalid username.")
+        if username not in users_list():
+            raise ValueError("Customer not found.")
+        p = run(["ocpasswd", "-d", "-c", PASSWD, username])
+        if p.returncode:
+            raise RuntimeError((p.stderr or p.stdout or "Could not remove user.").strip())
+        return {"message": "Customer removed."}
+    if op == "save_dns":
+        dns_values = req.get("dns", [])
+        if not isinstance(dns_values, list) or not 1 <= len(dns_values) <= 4:
+            raise ValueError("Enter between one and four DNS server IPs.")
+        try:
+            dns_values = [str(ipaddress.ip_address(x.strip())) for x in dns_values if isinstance(x, str)]
+        except ValueError:
+            raise ValueError("DNS entries must be valid IPv4 or IPv6 addresses.")
+        if not dns_values:
+            raise ValueError("At least one DNS server is required.")
+        with open(CONFIG, encoding="utf-8") as f:
+            lines = f.readlines()
+        backup = CONFIG + ".backup." + time.strftime("%Y%m%d%H%M%S")
+        shutil.copy2(CONFIG, backup)
+        lines = [line for line in lines if not re.match(r"^\s*dns\s*=", line)]
+        insert_at = next((i for i, line in enumerate(lines) if re.match(r"^\s*route\s*=", line)), len(lines))
+        lines[insert_at:insert_at] = [f"dns = {ip}\n" for ip in dns_values]
+        with open(CONFIG, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+        try:
+            config_check()
+            p = run(["systemctl", "restart", "ocserv"])
+            if p.returncode:
+                raise RuntimeError((p.stderr or p.stdout or "ocserv restart failed").strip())
+        except Exception:
+            shutil.copy2(backup, CONFIG)
+            run(["systemctl", "restart", "ocserv"])
+            raise
+        return {"message": "DNS settings saved and ocserv restarted."}
+    if op == "restart":
+        config_check()
+        p = run(["systemctl", "restart", "ocserv"])
+        if p.returncode:
+            raise RuntimeError((p.stderr or p.stdout or "ocserv restart failed").strip())
+        return {"message": "ocserv restarted."}
+    if op == "check":
+        return {"message": config_check()}
+    raise ValueError("Unsupported operation.")
+
+
+def main():
+    if os.geteuid() != 0:
+        raise RuntimeError("Helper must run as root.")
+    req = json.load(sys.stdin)
+    result = action(req)
+    print(json.dumps({"ok": True, "data": result}))
+
+
+try:
+    main()
+except Exception as exc:
+    print(json.dumps({"ok": False, "error": str(exc)}))
+    sys.exit(1)
