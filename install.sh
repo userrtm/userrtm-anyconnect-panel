@@ -24,4 +24,4 @@ if [[ ! -f "$TMP_DIR/scripts/install-core.sh" ]]; then
   echo "Installer files are missing from the downloaded repository."
   exit 1
 fi
-exec bash "$TMP_DIR/scripts/install-core.sh"
+bash "$TMP_DIR/scripts/install-core.sh"
