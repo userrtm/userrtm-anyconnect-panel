@@ -47,8 +47,14 @@ mkdir -p /etc/ocserv
 if [[ -f /etc/ocserv/ocserv.conf ]]; then
   cp /etc/ocserv/ocserv.conf "/etc/ocserv/ocserv.conf.backup.$(date +%Y%m%d%H%M%S)"
   echo "Existing ocserv config backed up and preserved."
+  if ! grep -Eq '^\s*server-cert\s*=' /etc/ocserv/ocserv.conf; then
+    printf '\n# Added by the panel installer\nserver-cert = /etc/letsencrypt/live/%s/fullchain.pem\n' "$DOMAIN" >> /etc/ocserv/ocserv.conf
+  fi
+  if ! grep -Eq '^\s*server-key\s*=' /etc/ocserv/ocserv.conf; then
+    printf 'server-key = /etc/letsencrypt/live/%s/privkey.pem\n' "$DOMAIN" >> /etc/ocserv/ocserv.conf
+  fi
   if ! grep -Eq '^\s*device\s*=' /etc/ocserv/ocserv.conf; then
-    printf '\n# Added by the panel installer\ndevice = vpns\n' >> /etc/ocserv/ocserv.conf
+    printf '\ndevice = vpns\n' >> /etc/ocserv/ocserv.conf
   fi
 else
 cat > /etc/ocserv/ocserv.conf <<CONF
