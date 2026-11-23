@@ -1,33 +1,28 @@
 # OpenConnect / AnyConnect Sunucu Paneli
 
-Ubuntu üzerinde `ocserv` hesaplarını ve temel sunucu ayarlarını yönetmek için web paneli. Bu ilk sürümde yönetici girişi, müşteri ekleme/silme, servis durumu ve yeniden başlatma, DNS ayarları, son kayıtlar ve açık/koyu tema bulunur.
+Ubuntu üzerinde `ocserv` hesaplarını ve temel sunucu ayarlarını yönetmek için web paneli. İlk sürümde yönetici girişi, müşteri ekleme/silme, servis durumu ve yeniden başlatma, DNS ayarları, son kayıtlar ve açık/koyu tema bulunur.
+
+## Kurulum
+
+Ubuntu VPS'te root yetkisiyle bu tek komutu çalıştır:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/userrtm/userrtm-anyconnect-panel/main/install.sh | sudo bash
+```
+
+Kurulum betiği GitHub'daki kaynak paketini geçici bir klasöre indirir ve kurulum sihirbazını başlatır. Alan adını, Let's Encrypt e-posta adresini, ilk VPN kullanıcı hesabını ve panel yöneticisini sorar. Panel `https://ALAN_ADIN:8443` adresinden açılır.
+
+> GitHub deposunun herkese açık olması gerekir ki VPS oturum açmadan `curl` ile dosyayı indirebilsin.
 
 ## Gereksinimler
 
 - Ubuntu 24.04 veya daha yeni
-- VPS IP adresine yönlenen bir alan adı A kaydı
+- VPS IP adresine yönlenen alan adı A kaydı
 - Dış güvenlik duvarında 80/TCP, 443/TCP, 443/UDP ve 8443/TCP erişimi
 - Root SSH erişimi
 
-## Kurulum
-
-Bu klasörü VPS'e yükle ve klasörün içinden çalıştır:
-
-```bash
-sudo bash install.sh
-```
-
-Kurulum alan adını, Let's Encrypt e-posta adresini, ilk VPN kullanıcı hesabını ve panel yöneticisini sorar. Panel `https://ALAN_ADIN:8443` adresinden açılır.
-
 Panel genel bir terminal açmaz. Root işlemleri sadece izinleri sınırlandırılmış `ocserv-panel-helper` üzerinden yürütülür.
 
-## Güvenlik
+## Güvenlik ve sınırlamalar
 
-Gerçek parolaları, özel anahtarları, `.env` dosyalarını veya `/etc/letsencrypt` içeriğini GitHub'a yükleme. Depoda üretim kimlik bilgileri bulunmamalı.
-
-## Sınırlamalar
-
-- DNS değişikliklerinden önce yapılandırmanın yedeği alınır ve `ocserv -t` ile kontrol edilir.
-- Panel 8443/TCP'de çalışır; VPN 443/TCP ve 443/UDP kullanır.
-- Sağlayıcının VPS dış güvenlik duvarında da gerekli portları aç.
-- Bu ilk sürümde süre sonu takibi, bayi/alt yönetici rolleri ve kullanım kotası yönetimi bulunmuyor; sonraki geliştirme aşamalarına eklenebilir.
+Gerçek parolaları, özel anahtarları, `.env` dosyalarını veya `/etc/letsencrypt` içeriğini depoya yükleme. DNS değişikliklerinden önce yapılandırmanın yedeği alınır ve `ocserv -t` ile kontrol edilir. Bu ilk sürümde süre sonu takibi, bayi/alt yönetici rolleri ve kullanım kotası yönetimi bulunmuyor.
