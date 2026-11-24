@@ -31,6 +31,10 @@ app.config.update(
 )
 
 
+class CustomerProfileNotFound(LookupError):
+    """A customer profile URL is unknown, disabled, deleted, or expired."""
+
+
 def db():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(DB_PATH, timeout=10)
@@ -51,7 +55,13 @@ def helper(payload):
     except (ValueError, TypeError):
         raise RuntimeError((p.stderr or p.stdout or "The privileged helper returned an invalid response.").strip())
     if p.returncode or not data.get("ok"):
-        raise RuntimeError(data.get("error", "Operation failed."))
+        message = data.get("error", "Operation failed.")
+        if payload.get("op") == "customer_profile" and message in {
+            "Profile not found.",
+            "Profile is inactive or expired.",
+        }:
+            raise CustomerProfileNotFound(message)
+        raise RuntimeError(message)
     return data["data"]
 
 
@@ -156,10 +166,11 @@ def customer_profile(token):
             "Cache-Control": "no-store, private",
             "Content-Disposition": f'inline; filename="{details["username"]}.xml"',
         })
-    except ValueError:
+    except CustomerProfileNotFound:
         return Response("Profile not found or inactive.", status=404, mimetype="text/plain", headers={"Cache-Control": "no-store"})
     except (RuntimeError, KeyError, TypeError, subprocess.TimeoutExpired) as exc:
-        return Response(str(exc), status=503, mimetype="text/plain", headers={"Cache-Control": "no-store"})
+        app.logger.exception("Unable to serve customer profile")
+        return Response("Profile temporarily unavailable.", status=503, mimetype="text/plain", headers={"Cache-Control": "no-store"})
 
 
 @app.post("/login")
