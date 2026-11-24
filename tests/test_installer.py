@@ -35,6 +35,7 @@ class InstallerTests(unittest.TestCase):
     def test_nat_uses_the_configured_vpn_pool(self):
         self.assertIn("ipaddress.ip_network(f'{network}/{mask}', strict=False)", self.source)
         self.assertNotIn('10.20.30.0/24 -o "$WAN_IF"', self.source)
+        self.assertIn('systemctl restart ocserv-nat.service', self.source)
 
 
 if __name__ == "__main__":
