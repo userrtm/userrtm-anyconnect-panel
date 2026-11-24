@@ -21,6 +21,7 @@ class HelperTests(unittest.TestCase):
         helper.CONFIG = root / "ocserv.conf"
         helper.PASSWD = root / "ocpasswd"
         helper.META = root / "panel" / "users.json"
+        helper.VPN_DOMAIN = root / "panel" / "vpn-domain"
         helper.CONFIG.write_text(
             "server-cert = /etc/letsencrypt/live/vpn.example.com/fullchain.pem\n"
             "server-key = /etc/letsencrypt/live/vpn.example.com/privkey.pem\n"
@@ -94,6 +95,37 @@ class HelperTests(unittest.TestCase):
 
     def test_profile_url_uses_vpn_certificate_hostname(self):
         self.assertEqual(helper.action({"op": "profile"}), {"host": "vpn.example.com", "port": "443"})
+
+    def test_profile_hostname_handles_quoted_certificate_path(self):
+        helper.CONFIG.write_text(
+            'server-cert = "/opt/certs/server.pem"\n'
+            'server-key = "/opt/certs/server-key.pem"\n'
+            'tcp-port = 443\n',
+            encoding="utf-8",
+        )
+        helper.VPN_DOMAIN.parent.mkdir(parents=True, exist_ok=True)
+        helper.VPN_DOMAIN.write_text("vpn.example.com\n", encoding="utf-8")
+        self.assertEqual(helper.action({"op": "profile"}), {"host": "vpn.example.com", "port": "443"})
+
+    def test_reports_actual_password_file_from_auth_config(self):
+        helper.CONFIG.write_text(
+            'auth = "plain[passwd=/etc/ocserv/passwd]"\n'
+            'server-cert = /etc/letsencrypt/live/vpn.example.com/fullchain.pem\n'
+            'tcp-port = 443\n',
+            encoding="utf-8",
+        )
+        settings = helper.get_settings()
+        self.assertEqual(settings["auth_passwd"], "/etc/ocserv/passwd")
+        self.assertFalse(settings["auth_file_exists"])
+
+    def test_config_check_detects_missing_vpn_password_file(self):
+        helper.CONFIG.write_text(
+            'auth = "plain[passwd=/missing/ocserv/passwd]"\n'
+            'server-cert = /etc/letsencrypt/live/vpn.example.com/fullchain.pem\n',
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(RuntimeError, "password file is missing"):
+            helper.config_check()
 
     def test_each_customer_gets_a_private_profile_url(self):
         helper.action({"op": "add_user", "username": "alice", "password": "long-password-a"})

@@ -22,6 +22,12 @@ class InstallerTests(unittest.TestCase):
         writable = set(match.group(1).split())
         self.assertTrue({"/var/lib/ocserv-panel", "/etc/ocserv", "/etc/ocserv-panel", "/run"}.issubset(writable))
 
+    def test_installer_aligns_vpn_auth_and_certificate_with_panel(self):
+        self.assertIn('plain[passwd=/etc/ocserv/ocpasswd]', self.source)
+        self.assertIn('fullchain.pem', self.source)
+        self.assertIn('privkey.pem', self.source)
+        self.assertIn('/etc/ocserv-panel/vpn-domain', self.source)
+
 
 if __name__ == "__main__":
     unittest.main()
