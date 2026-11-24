@@ -62,10 +62,12 @@ settings = {
     'auth': 'auth = "plain[passwd=/etc/ocserv/ocpasswd]"',
     'server-cert': f'server-cert = /etc/letsencrypt/live/{domain}/fullchain.pem',
     'server-key': f'server-key = /etc/letsencrypt/live/{domain}/privkey.pem',
+    'config-per-user': 'config-per-user = /etc/ocserv/config-per-user/',
+    'max-same-clients': 'max-same-clients = 1',
 }
 found = set()
 for index, line in enumerate(lines):
-    match = re.match(r'^\s*(auth|server-cert|server-key|route|no-route)\s*=', line)
+    match = re.match(r'^\s*(auth|server-cert|server-key|config-per-user|max-same-clients|route|no-route)\s*=', line)
     if match:
         key = match.group(1)
         if key in ('route', 'no-route'):
@@ -98,7 +100,8 @@ server-cert = /etc/letsencrypt/live/${DOMAIN}/fullchain.pem
 server-key = /etc/letsencrypt/live/${DOMAIN}/privkey.pem
 device = vpns
 max-clients = 100
-max-same-clients = 2
+config-per-user = /etc/ocserv/config-per-user/
+max-same-clients = 1
 keepalive = 32400
 dpd = 90
 mobile-dpd = 1800
@@ -116,6 +119,7 @@ if [[ ! -e /etc/ocserv/ocpasswd ]]; then
   install -m 0600 /dev/null /etc/ocserv/ocpasswd
 fi
 chmod 0600 /etc/ocserv/ocpasswd
+install -d -o root -g root -m 0750 /etc/ocserv/config-per-user
 
 cat > /etc/sysctl.d/99-ocserv.conf <<'SYSCTL'
 net.ipv4.ip_forward=1
@@ -158,7 +162,7 @@ chown root:ocserv-panel /etc/ocserv-panel/secret_key
 chmod 0640 /etc/ocserv-panel/secret_key
 
 install -d -o root -g root -m 0755 /opt/ocserv-panel
-cp -a "$APP_SRC/app.py" "$APP_SRC/requirements.txt" "$APP_SRC/templates" "$APP_SRC/static" /opt/ocserv-panel/
+cp -a "$APP_SRC/app.py" "$APP_SRC/VERSION" "$APP_SRC/requirements.txt" "$APP_SRC/templates" "$APP_SRC/static" /opt/ocserv-panel/
 python3 -m venv /opt/ocserv-panel/.venv
 /opt/ocserv-panel/.venv/bin/pip install --upgrade pip
 /opt/ocserv-panel/.venv/bin/pip install -r /opt/ocserv-panel/requirements.txt
