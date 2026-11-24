@@ -16,6 +16,8 @@ from werkzeug.security import check_password_hash, generate_password_hash
 DB_PATH = Path(os.environ.get("PANEL_DB", "/var/lib/ocserv-panel/panel.db"))
 HELPER = "/usr/local/sbin/ocserv-panel-helper"
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
+VERSION_FILE = Path(__file__).with_name("VERSION")
+PANEL_VERSION = VERSION_FILE.read_text(encoding="utf-8").strip() if VERSION_FILE.is_file() else "dev"
 
 app = Flask(__name__)
 secret_path = Path("/etc/ocserv-panel/secret_key")
@@ -172,7 +174,7 @@ def api_operation(payload):
 def index():
     if not session.get("admin"):
         return redirect(url_for("login"))
-    return render_template("index.html", csrf=csrf_token(), username=session["admin"])
+    return render_template("index.html", csrf=csrf_token(), username=session["admin"], panel_version=PANEL_VERSION)
 
 
 @app.get("/login")
@@ -280,7 +282,10 @@ def api_add_user():
         password = body.get("password", "")
         if not isinstance(password, str) or not password or len(password) > 128 or '\n' in password or '\r' in password:
             raise ValueError("VPN şifresi boş olamaz; en fazla 128 karakter olabilir.")
-        return api_operation({"op": "add_user", "username": username, "password": password, "days": body.get("days")})
+        return api_operation({
+            "op": "add_user", "username": username, "password": password,
+            "days": body.get("days"), "max_same_clients": body.get("max_same_clients", 1),
+        })
     except ValueError as exc:
         return jsonify(error=str(exc)), 400
 
@@ -299,6 +304,19 @@ def api_user_status(username):
         if not isinstance(body.get("active"), bool):
             raise ValueError("active alanı true veya false olmalı.")
         return api_operation({"op": "enable_user" if body["active"] else "disable_user", "username": username})
+    except ValueError as exc:
+        return jsonify(error=str(exc)), 400
+
+
+@app.post("/api/users/<username>/limit")
+@login_required
+def api_user_limit(username):
+    try:
+        body = json_body()
+        limit = body.get("max_same_clients")
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 4:
+            raise ValueError("Eşzamanlı cihaz sınırı 1–4 arasında olmalı.")
+        return api_operation({"op": "set_limit", "username": username, "max_same_clients": limit})
     except ValueError as exc:
         return jsonify(error=str(exc)), 400
 
