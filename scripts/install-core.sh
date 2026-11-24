@@ -273,6 +273,7 @@ fi
 
 systemctl daemon-reload
 systemctl enable --now ocserv-nat.service
+systemctl restart ocserv-nat.service
 systemctl enable --now ocserv.service
 systemctl restart ocserv.service
 systemctl enable --now ocserv-panel.service
