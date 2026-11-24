@@ -2,6 +2,7 @@ import importlib
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 TEMP = tempfile.TemporaryDirectory()
@@ -58,6 +59,19 @@ class PanelRouteTests(unittest.TestCase):
         }, headers={"X-CSRF-Token": csrf})
         self.assertEqual(response.status_code, 400)
         self.assertIn("Mevcut", response.get_json()["error"])
+
+    def test_customer_profile_url_serves_their_server_profile(self):
+        with patch.object(panel, "helper", return_value={"username": "alice", "host": "vpn.example.com", "port": "443"}):
+            response = self.client.get("/customer-profile/" + "A" * 43 + ".xml", base_url=self.base)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"UserrTM - alice", response.data)
+        self.assertIn(b"vpn.example.com", response.data)
+        self.assertEqual(response.headers["Cache-Control"], "no-store, private")
+
+    def test_customer_profile_rejects_revoked_urls(self):
+        with patch.object(panel, "helper", side_effect=ValueError("Profile not found.")):
+            response = self.client.get("/customer-profile/" + "A" * 43 + ".xml", base_url=self.base)
+        self.assertEqual(response.status_code, 404)
 
 
 if __name__ == "__main__":

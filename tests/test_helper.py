@@ -95,6 +95,35 @@ class HelperTests(unittest.TestCase):
     def test_profile_url_uses_vpn_certificate_hostname(self):
         self.assertEqual(helper.action({"op": "profile"}), {"host": "vpn.example.com", "port": "443"})
 
+    def test_each_customer_gets_a_private_profile_url(self):
+        helper.action({"op": "add_user", "username": "alice", "password": "long-password-a"})
+        helper.action({"op": "add_user", "username": "bob", "password": "long-password-b"})
+        rows = {row["username"]: row for row in helper.snapshot(helper.load_meta())}
+        self.assertNotEqual(rows["alice"]["profile_token"], rows["bob"]["profile_token"])
+        self.assertEqual(
+            helper.action({"op": "customer_profile", "token": rows["alice"]["profile_token"]}),
+            {"username": "alice", "host": "vpn.example.com", "port": "443"},
+        )
+        helper.action({"op": "disable_user", "username": "alice"})
+        with self.assertRaises(ValueError):
+            helper.action({"op": "customer_profile", "token": rows["alice"]["profile_token"]})
+
+    def test_profile_url_is_revoked_on_customer_delete(self):
+        helper.action({"op": "add_user", "username": "revoke", "password": "long-password"})
+        token = helper.snapshot(helper.load_meta())[0]["profile_token"]
+        helper.action({"op": "delete_user", "username": "revoke"})
+        with self.assertRaises(ValueError):
+            helper.action({"op": "customer_profile", "token": token})
+
+    def test_profile_url_is_unavailable_after_expiry(self):
+        helper.action({"op": "add_user", "username": "expired", "password": "long-password"})
+        meta = helper.load_meta()
+        token = meta["users"]["expired"]["profile_token"]
+        meta["users"]["expired"]["expires_at"] = 1
+        helper.save_meta(meta)
+        with self.assertRaises(ValueError):
+            helper.action({"op": "customer_profile", "token": token})
+
 
 if __name__ == "__main__":
     unittest.main()
