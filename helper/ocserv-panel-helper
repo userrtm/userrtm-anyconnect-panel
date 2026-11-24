@@ -15,6 +15,7 @@ from pathlib import Path
 CONFIG = Path('/etc/ocserv/ocserv.conf')
 PASSWD = Path('/etc/ocserv/ocpasswd')
 META = Path('/etc/ocserv-panel/users.json')
+VPN_DOMAIN = Path('/etc/ocserv-panel/vpn-domain')
 USERNAME_RE = re.compile(r'^[A-Za-z0-9_-]{1,32}$')
 MAX_EXPIRY = 10 * 365 * 86400
 
@@ -124,11 +125,40 @@ def get_settings():
     def one(pattern, default=''):
         m = re.search(pattern, content, re.M)
         return m.group(1).strip() if m else default
+    cert_setting = one(r'^\s*server-cert\s*=\s*(.*?)\s*$')
+    cert_path = cert_setting.strip().strip('"\'')
+    path_domain = ''
+    cert_parts = Path(cert_path).parts
+    if 'live' in cert_parts:
+        live_index = cert_parts.index('live')
+        if live_index + 1 < len(cert_parts):
+            candidate = cert_parts[live_index + 1]
+            if re.fullmatch(r'[A-Za-z0-9.-]+', candidate):
+                path_domain = candidate
+    configured_domain = VPN_DOMAIN.read_text(encoding='utf-8').strip() if VPN_DOMAIN.is_file() else ''
+    if not re.fullmatch(r'[A-Za-z0-9.-]+', configured_domain):
+        configured_domain = ''
+    cert_names = []
+    if cert_path and Path(cert_path).is_file():
+        cert = run(['openssl', 'x509', '-in', cert_path, '-noout', '-ext', 'subjectAltName'])
+        cert_names = sorted(set(re.findall(r'DNS:([A-Za-z0-9.-]+)', cert.stdout))) if cert.returncode == 0 else []
+    domain = next((candidate for candidate in (path_domain, configured_domain) if candidate and (not cert_names or candidate in cert_names)), '')
+    if not domain and len(cert_names) == 1:
+        domain = cert_names[0]
+    auth_file = get_auth_passwd_path(content)
     return {
-        'domain': one(r'^\s*server-cert\s*=\s*/etc/letsencrypt/live/([^/]+)/fullchain\.pem\s*$'),
+        'domain': domain,
         'port': one(r'^\s*tcp-port\s*=\s*(\d+)\s*$', '443'),
         'dns': re.findall(r'^\s*dns\s*=\s*(\S+)\s*$', content, re.M),
+        'auth_passwd': str(auth_file) if auth_file else '',
+        'auth_file_exists': bool(auth_file and auth_file.is_file()),
     }
+
+
+def get_auth_passwd_path(content=None):
+    content = content if content is not None else CONFIG.read_text(encoding='utf-8')
+    match = re.search(r'^\s*auth\s*=\s*["\']?plain\[passwd=([^\]"\']+)\]["\']?\s*$', content, re.M)
+    return Path(match.group(1).strip()) if match else None
 
 
 def service_status():
@@ -142,6 +172,9 @@ def config_check():
     p = run(['ocserv', '-t', '-c', str(CONFIG)])
     if p.returncode:
         raise RuntimeError((p.stderr or p.stdout or 'ocserv config check failed').strip())
+    passwd_path = get_auth_passwd_path()
+    if passwd_path and not passwd_path.is_file():
+        raise RuntimeError(f'VPN password file is missing: {passwd_path}. Set auth to /etc/ocserv/ocpasswd and restart ocserv.')
     return 'Configuration is valid.'
 
 
