@@ -41,8 +41,48 @@ def db():
     con.row_factory = sqlite3.Row
     con.execute("CREATE TABLE IF NOT EXISTS admins (username TEXT PRIMARY KEY, password_hash TEXT NOT NULL)")
     con.execute("CREATE TABLE IF NOT EXISTS login_attempts (ip TEXT PRIMARY KEY, failures INTEGER NOT NULL, locked_until REAL NOT NULL, updated_at REAL NOT NULL)")
+    con.execute("CREATE TABLE IF NOT EXISTS admin_events (id INTEGER PRIMARY KEY AUTOINCREMENT, actor TEXT NOT NULL, action TEXT NOT NULL, detail TEXT NOT NULL, created_at REAL NOT NULL)")
     con.commit()
     return con
+
+
+EVENT_LABELS = {
+    "add_user": "Müşteri oluşturuldu",
+    "delete_user": "Müşteri silindi",
+    "disable_user": "Müşteri durduruldu",
+    "enable_user": "Müşteri etkinleştirildi",
+    "set_expiry": "Abonelik süresi güncellendi",
+    "reset_password": "VPN parolası yenilendi",
+    "save_dns": "DNS ayarları değiştirildi",
+    "restart": "VPN servisi yeniden başlatıldı",
+}
+
+
+def record_event(payload):
+    op = payload.get("op")
+    label = EVENT_LABELS.get(op)
+    if not label:
+        return
+    username = payload.get("username", "")
+    detail = f"Kullanıcı: {username}" if username else ""
+    if op == "set_expiry":
+        days = payload.get("days")
+        detail += f" · Süre: {'sınırsız' if days in (None, '') else str(days) + ' gün'}"
+    con = db()
+    try:
+        con.execute("INSERT INTO admin_events(actor,action,detail,created_at) VALUES(?,?,?,?)", (session.get("admin", "admin"), label, detail, time.time()))
+        con.commit()
+    finally:
+        con.close()
+
+
+def recent_events(limit=50):
+    con = db()
+    try:
+        rows = con.execute("SELECT actor,action,detail,created_at FROM admin_events ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        con.close()
 
 
 def helper(payload):
@@ -62,7 +102,13 @@ def helper(payload):
         }:
             raise CustomerProfileNotFound(message)
         raise RuntimeError(message)
-    return data["data"]
+    result = data["data"]
+    if payload.get("op") != "state":
+        try:
+            record_event(payload)
+        except sqlite3.Error:
+            app.logger.exception("Could not record panel activity")
+    return result
 
 
 def csrf_token():
@@ -93,6 +139,9 @@ def security_headers(response):
     response.headers.setdefault("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; base-uri 'self'; frame-ancestors 'none'; form-action 'self'")
     if request.is_secure:
         response.headers.setdefault("Strict-Transport-Security", "max-age=31536000")
+    if request.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store, private"
+        response.headers["Pragma"] = "no-cache"
     return response
 
 
@@ -138,7 +187,7 @@ def client_profile():
     """Serve a minimal Cisco Secure Client server-list profile for URI import."""
     try:
         details = helper({"op": "profile"})
-        body = build_profile(details["host"], details.get("port", "443"), "UserrTM Servers")
+        body = build_profile(details["host"], details.get("port", "443"), details["host"])
         return Response(body, mimetype="application/xml", headers={"Cache-Control": "no-store", "Content-Disposition": 'inline; filename="UserrTM-AnyConnect.xml"'})
     except (RuntimeError, KeyError, TypeError, subprocess.TimeoutExpired) as exc:
         return Response(str(exc), status=503, mimetype="text/plain", headers={"Cache-Control": "no-store"})
@@ -161,7 +210,7 @@ def customer_profile(token):
     """Serve a private, revocable Cisco Secure Client profile URL per customer."""
     try:
         details = helper({"op": "customer_profile", "token": token})
-        body = build_profile(details["host"], details.get("port", "443"), f"UserrTM - {details['username']}")
+        body = build_profile(details["host"], details.get("port", "443"), details["host"])
         return Response(body, mimetype="application/xml", headers={
             "Cache-Control": "no-store, private",
             "Content-Disposition": f'inline; filename="{details["username"]}.xml"',
@@ -212,7 +261,12 @@ def logout():
 @app.get("/api/state")
 @login_required
 def api_state():
-    return api_operation({"op": "state"})
+    try:
+        result = helper({"op": "state"})
+        result["events"] = recent_events()
+        return jsonify(result)
+    except (RuntimeError, ValueError, OSError, subprocess.TimeoutExpired, sqlite3.Error) as exc:
+        return jsonify(error=str(exc)), 400
 
 
 @app.post("/api/users")
