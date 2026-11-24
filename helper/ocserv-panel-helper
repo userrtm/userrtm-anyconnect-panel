@@ -4,6 +4,7 @@ import ipaddress
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -169,20 +170,54 @@ def expiry_from_days(days):
 def snapshot(meta):
     active_entries = users_list()
     users = []
+    changed = False
     names = set(active_entries) | set(meta['users'])
     for username in sorted(names, key=str.casefold):
-        record = meta['users'].get(username, {})
+        if username not in meta['users']:
+            meta['users'][username] = {'status': 'active' if username in active_entries else 'disabled', 'created_at': int(time.time())}
+            changed = True
+        record = meta['users'][username]
         status = record.get('status', 'active' if username in active_entries else 'disabled')
         if status not in ('active', 'disabled', 'expired'):
             status = 'active' if username in active_entries else 'disabled'
             record['status'] = status
+            changed = True
+        if not isinstance(record.get('profile_token'), str) or not re.fullmatch(r'[A-Za-z0-9_-]{40,}', record['profile_token']):
+            record['profile_token'] = secrets.token_urlsafe(32)
+            changed = True
         users.append({
             'username': username,
             'status': status,
             'expires_at': record.get('expires_at'),
             'created_at': record.get('created_at'),
+            'profile_token': record['profile_token'],
         })
+    if changed:
+        save_meta(meta)
     return users
+
+
+def customer_profile(token):
+    if not isinstance(token, str) or not re.fullmatch(r'[A-Za-z0-9_-]{40,}', token):
+        raise ValueError('Profile not found.')
+    meta = load_meta()
+    matches = []
+    for username, record in meta['users'].items():
+        saved = record.get('profile_token', '')
+        if isinstance(saved, str) and secrets.compare_digest(saved, token):
+            matches.append((username, record))
+    if len(matches) != 1:
+        raise ValueError('Profile not found.')
+    username, record = matches[0]
+    expires = record.get('expires_at')
+    if (record.get('status', 'active') != 'active' or username not in users_list()
+            or (expires and int(expires) <= int(time.time()))):
+        raise ValueError('Profile is inactive or expired.')
+    settings = get_settings()
+    host = settings['domain']
+    if not host or not re.fullmatch(r'[A-Za-z0-9.-]+', host):
+        raise RuntimeError('Could not determine the VPN hostname from the TLS certificate setting.')
+    return {'username': username, 'host': host, 'port': settings['port']}
 
 
 def action(req):
@@ -190,6 +225,7 @@ def action(req):
     if op == 'state':
         meta = load_meta()
         expire_users(meta)
+        meta = load_meta()
         return {
             'users': snapshot(meta),
             'settings': get_settings(),
@@ -202,6 +238,8 @@ def action(req):
         if not host or not re.fullmatch(r'[A-Za-z0-9.-]+', host):
             raise RuntimeError('Could not determine the VPN hostname from the TLS certificate setting.')
         return {'host': host, 'port': settings['port']}
+    if op == 'customer_profile':
+        return customer_profile(req.get('token'))
     if op == 'add_user':
         username, password = req.get('username', ''), req.get('password', '')
         validate_username(username)
@@ -209,14 +247,21 @@ def action(req):
         meta = load_meta()
         if username in users_list() or username in meta['users']:
             raise ValueError('Customer already exists. Use password reset or re-enable instead.')
+        expires_at = expiry_from_days(req.get('days'))
         set_password(username, password)
-        meta['users'][username] = {'status': 'active', 'expires_at': expiry_from_days(req.get('days')), 'created_at': int(time.time())}
+        profile_token = secrets.token_urlsafe(32)
+        meta['users'][username] = {
+            'status': 'active',
+            'expires_at': expires_at,
+            'created_at': int(time.time()),
+            'profile_token': profile_token,
+        }
         try:
             save_meta(meta)
         except Exception:
             remove_password(username)
             raise
-        return {'message': 'Customer added.'}
+        return {'message': 'Customer added.', 'profile_token': profile_token}
     if op == 'delete_user':
         username = req.get('username', '')
         validate_username(username)
