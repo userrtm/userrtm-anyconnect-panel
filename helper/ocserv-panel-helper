@@ -14,6 +14,7 @@ from pathlib import Path
 
 CONFIG = Path('/etc/ocserv/ocserv.conf')
 PASSWD = Path('/etc/ocserv/ocpasswd')
+USER_CONFIG_DIR = Path('/etc/ocserv/config-per-user')
 META = Path('/etc/ocserv-panel/users.json')
 VPN_DOMAIN = Path('/etc/ocserv-panel/vpn-domain')
 USERNAME_RE = re.compile(r'^[A-Za-z0-9_-]{1,32}$')
@@ -75,6 +76,31 @@ def remove_password(username):
     if p.returncode:
         raise RuntimeError((p.stderr or p.stdout or 'Could not remove VPN password.').strip())
     os.chmod(PASSWD, 0o600)
+
+
+def validate_connection_limit(value):
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 4:
+        raise ValueError('The simultaneous device limit must be between 1 and 4.')
+    return value
+
+
+def set_connection_limit(username, value):
+    validate_username(username)
+    value = validate_connection_limit(value)
+    USER_CONFIG_DIR.mkdir(mode=0o750, parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix='.client-limit.', dir=str(USER_CONFIG_DIR), text=True)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            f.write(f'max-same-clients = {value}\n')
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(temp_name, 0o640)
+        os.replace(temp_name, USER_CONFIG_DIR / username)
+    finally:
+        try:
+            os.unlink(temp_name)
+        except FileNotFoundError:
+            pass
 
 
 def lock_password(username, locked):
@@ -224,6 +250,7 @@ def snapshot(meta):
             'expires_at': record.get('expires_at'),
             'created_at': record.get('created_at'),
             'profile_token': record['profile_token'],
+            'max_same_clients': record.setdefault('max_same_clients', 1),
         })
     if changed:
         save_meta(meta)
@@ -277,22 +304,26 @@ def action(req):
         username, password = req.get('username', ''), req.get('password', '')
         validate_username(username)
         validate_password(password)
+        max_same_clients = validate_connection_limit(req.get('max_same_clients', 1))
         meta = load_meta()
         if username in users_list() or username in meta['users']:
             raise ValueError('Customer already exists. Use password reset or re-enable instead.')
         expires_at = expiry_from_days(req.get('days'))
         set_password(username, password)
         profile_token = secrets.token_urlsafe(32)
-        meta['users'][username] = {
-            'status': 'active',
-            'expires_at': expires_at,
-            'created_at': int(time.time()),
-            'profile_token': profile_token,
-        }
         try:
+            set_connection_limit(username, max_same_clients)
+            meta['users'][username] = {
+                'status': 'active',
+                'expires_at': expires_at,
+                'created_at': int(time.time()),
+                'profile_token': profile_token,
+                'max_same_clients': max_same_clients,
+            }
             save_meta(meta)
         except Exception:
             remove_password(username)
+            (USER_CONFIG_DIR / username).unlink(missing_ok=True)
             raise
         return {'message': 'Customer added.', 'profile_token': profile_token}
     if op == 'delete_user':
@@ -304,8 +335,22 @@ def action(req):
         elif username not in meta['users']:
             raise ValueError('Customer not found.')
         meta['users'].pop(username, None)
+        (USER_CONFIG_DIR / username).unlink(missing_ok=True)
         save_meta(meta)
         return {'message': 'Customer permanently removed.'}
+    if op == 'set_limit':
+        username = req.get('username', '')
+        validate_username(username)
+        if username not in users_list():
+            raise ValueError('Customer not found.')
+        value = validate_connection_limit(req.get('max_same_clients'))
+        meta = load_meta()
+        record = meta['users'].setdefault(username, {'status': 'active', 'created_at': int(time.time())})
+        set_connection_limit(username, value)
+        record['max_same_clients'] = value
+        record['updated_at'] = int(time.time())
+        save_meta(meta)
+        return {'message': 'Simultaneous device limit updated.', 'max_same_clients': value}
     if op in ('disable_user', 'enable_user', 'set_expiry', 'reset_password'):
         username = req.get('username', '')
         validate_username(username)
