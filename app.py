@@ -128,17 +128,36 @@ def client_profile():
     """Serve a minimal Cisco Secure Client server-list profile for URI import."""
     try:
         details = helper({"op": "profile"})
-        namespace = "http://schemas.xmlsoap.org/encoding/"
-        ET.register_namespace("", namespace)
-        root = ET.Element(f"{{{namespace}}}AnyConnectProfile")
-        servers = ET.SubElement(root, f"{{{namespace}}}ServerList")
-        entry = ET.SubElement(servers, f"{{{namespace}}}HostEntry")
-        ET.SubElement(entry, f"{{{namespace}}}HostName").text = "UserrTM Servers"
-        host = details["host"]
-        port = str(details.get("port", "443"))
-        ET.SubElement(entry, f"{{{namespace}}}HostAddress").text = host if port == "443" else f"{host}:{port}"
-        body = b'<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(root, encoding="utf-8")
+        body = build_profile(details["host"], details.get("port", "443"), "UserrTM Servers")
         return Response(body, mimetype="application/xml", headers={"Cache-Control": "no-store", "Content-Disposition": 'inline; filename="UserrTM-AnyConnect.xml"'})
+    except (RuntimeError, KeyError, TypeError, subprocess.TimeoutExpired) as exc:
+        return Response(str(exc), status=503, mimetype="text/plain", headers={"Cache-Control": "no-store"})
+
+
+def build_profile(host, port, display_name):
+    namespace = "http://schemas.xmlsoap.org/encoding/"
+    ET.register_namespace("", namespace)
+    root = ET.Element(f"{{{namespace}}}AnyConnectProfile")
+    servers = ET.SubElement(root, f"{{{namespace}}}ServerList")
+    entry = ET.SubElement(servers, f"{{{namespace}}}HostEntry")
+    ET.SubElement(entry, f"{{{namespace}}}HostName").text = display_name
+    port = str(port)
+    ET.SubElement(entry, f"{{{namespace}}}HostAddress").text = host if port == "443" else f"{host}:{port}"
+    return b'<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(root, encoding="utf-8")
+
+
+@app.get("/customer-profile/<token>.xml")
+def customer_profile(token):
+    """Serve a private, revocable Cisco Secure Client profile URL per customer."""
+    try:
+        details = helper({"op": "customer_profile", "token": token})
+        body = build_profile(details["host"], details.get("port", "443"), f"UserrTM - {details['username']}")
+        return Response(body, mimetype="application/xml", headers={
+            "Cache-Control": "no-store, private",
+            "Content-Disposition": f'inline; filename="{details["username"]}.xml"',
+        })
+    except ValueError:
+        return Response("Profile not found or inactive.", status=404, mimetype="text/plain", headers={"Cache-Control": "no-store"})
     except (RuntimeError, KeyError, TypeError, subprocess.TimeoutExpired) as exc:
         return Response(str(exc), status=503, mimetype="text/plain", headers={"Cache-Control": "no-store"})
 
