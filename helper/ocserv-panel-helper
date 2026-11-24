@@ -184,8 +184,8 @@ def validate_username(username):
 
 
 def validate_password(password):
-    if not isinstance(password, str) or len(password) < 10 or len(password) > 128 or '\n' in password or '\r' in password:
-        raise ValueError('Password must be 10–128 characters and cannot contain line breaks.')
+    if not isinstance(password, str) or not password or len(password) > 128 or '\n' in password or '\r' in password:
+        raise ValueError('Password must be non-empty, at most 128 characters, and cannot contain line breaks.')
 
 
 def expiry_from_days(days):
