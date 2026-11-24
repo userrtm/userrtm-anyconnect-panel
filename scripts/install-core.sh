@@ -9,10 +9,8 @@ VPN_PORT=443
 PANEL_PORT=8443
 read -rp "VPN domain (for example vpn.example.com): " DOMAIN
 read -rp "Let's Encrypt email: " EMAIL
-read -rp "First VPN customer username (leave blank to skip): " FIRST_USER
 
 if [[ ! "$DOMAIN" =~ ^[A-Za-z0-9.-]+$ ]]; then echo "Invalid domain."; exit 1; fi
-if [[ -n "$FIRST_USER" && ! "$FIRST_USER" =~ ^[A-Za-z0-9_-]{1,32}$ ]]; then echo "Invalid username."; exit 1; fi
 
 echo "Installing packages..."
 export DEBIAN_FRONTEND=noninteractive
@@ -82,11 +80,10 @@ tunnel-all-dns = true
 CONF
 fi
 
-if [[ -n "$FIRST_USER" ]]; then
-  echo "Create or update the VPN account; enter its password twice."
-  ocpasswd -c /etc/ocserv/ocpasswd "$FIRST_USER"
-  chmod 600 /etc/ocserv/ocpasswd
+if [[ ! -e /etc/ocserv/ocpasswd ]]; then
+  install -m 0600 /dev/null /etc/ocserv/ocpasswd
 fi
+chmod 0600 /etc/ocserv/ocpasswd
 
 cat > /etc/sysctl.d/99-ocserv.conf <<'SYSCTL'
 net.ipv4.ip_forward=1
@@ -104,6 +101,20 @@ id -u ocserv-panel >/dev/null 2>&1 || useradd --system --home-dir /var/lib/ocser
 getent group ssl-cert >/dev/null 2>&1 && usermod -aG ssl-cert ocserv-panel || true
 install -d -o ocserv-panel -g ocserv-panel -m 0750 /var/lib/ocserv-panel
 install -d -o root -g ocserv-panel -m 0750 /etc/ocserv-panel
+install -d -o root -g ocserv-panel -m 0750 /etc/ocserv-panel/tls
+cat > /usr/local/sbin/ocserv-panel-sync-cert <<'SYNC_CERT'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+LINEAGE="${1:?Usage: ocserv-panel-sync-cert /etc/letsencrypt/live/<domain>}"
+[[ -r "$LINEAGE/fullchain.pem" && -r "$LINEAGE/privkey.pem" ]] || {
+  echo "Certificate or private key is unavailable in $LINEAGE" >&2
+  exit 1
+}
+install -o root -g ocserv-panel -m 0640 "$LINEAGE/fullchain.pem" /etc/ocserv-panel/tls/fullchain.pem
+install -o root -g ocserv-panel -m 0640 "$LINEAGE/privkey.pem" /etc/ocserv-panel/tls/privkey.pem
+SYNC_CERT
+chmod 0750 /usr/local/sbin/ocserv-panel-sync-cert
+/usr/local/sbin/ocserv-panel-sync-cert "/etc/letsencrypt/live/${DOMAIN}"
 if [[ ! -f /etc/ocserv-panel/secret_key ]]; then
   umask 027
   openssl rand -hex 48 > /etc/ocserv-panel/secret_key
@@ -174,7 +185,7 @@ Wants=network-online.target
 User=ocserv-panel
 Group=ocserv-panel
 WorkingDirectory=/opt/ocserv-panel
-ExecStart=/opt/ocserv-panel/.venv/bin/gunicorn --workers 2 --bind 0.0.0.0:${PANEL_PORT} --certfile /etc/letsencrypt/live/${DOMAIN}/fullchain.pem --keyfile /etc/letsencrypt/live/${DOMAIN}/privkey.pem app:app
+ExecStart=/opt/ocserv-panel/.venv/bin/gunicorn --workers 2 --bind 0.0.0.0:${PANEL_PORT} --certfile /etc/ocserv-panel/tls/fullchain.pem --keyfile /etc/ocserv-panel/tls/privkey.pem app:app
 Restart=on-failure
 RestartSec=3
 PrivateTmp=true
@@ -186,8 +197,12 @@ WantedBy=multi-user.target
 UNIT
 
 mkdir -p /etc/letsencrypt/renewal-hooks/deploy
-cat > /etc/letsencrypt/renewal-hooks/deploy/restart-ocserv-services <<'HOOK'
+cat > /etc/letsencrypt/renewal-hooks/deploy/restart-ocserv-services <<HOOK
 #!/bin/sh
+set -eu
+if [ "\${RENEWED_LINEAGE:-}" = "/etc/letsencrypt/live/${DOMAIN}" ]; then
+  /usr/local/sbin/ocserv-panel-sync-cert "\$RENEWED_LINEAGE"
+fi
 systemctl restart ocserv.service ocserv-panel.service
 HOOK
 chmod 0755 /etc/letsencrypt/renewal-hooks/deploy/restart-ocserv-services
@@ -218,4 +233,5 @@ echo
 echo "Installation complete."
 echo "Panel: https://${DOMAIN}:${PANEL_PORT}"
 echo "VPN: ${DOMAIN}:${VPN_PORT} (TCP/UDP)"
+echo "Next: sign in to the web panel and add VPN customers there. Each customer gets a personal Cisco profile URL."
 echo "Open 80/TCP, 443/TCP+UDP and 8443/TCP in the VPS provider firewall."
