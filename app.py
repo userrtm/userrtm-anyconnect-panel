@@ -278,8 +278,8 @@ def api_add_user():
         if not isinstance(username, str) or not USERNAME_RE.fullmatch(username):
             raise ValueError("Kullanıcı adı 1–32 karakter olmalı; harf, rakam, _ ve - kullanın.")
         password = body.get("password", "")
-        if not isinstance(password, str) or len(password) < 10 or len(password) > 128:
-            raise ValueError("VPN şifresi 10–128 karakter olmalı.")
+        if not isinstance(password, str) or not password or len(password) > 128 or '\n' in password or '\r' in password:
+            raise ValueError("VPN şifresi boş olamaz; en fazla 128 karakter olabilir.")
         return api_operation({"op": "add_user", "username": username, "password": password, "days": body.get("days")})
     except ValueError as exc:
         return jsonify(error=str(exc)), 400
@@ -322,8 +322,8 @@ def api_user_password(username):
     try:
         body = json_body()
         password = body.get("password", "")
-        if not isinstance(password, str) or len(password) < 10 or len(password) > 128:
-            raise ValueError("VPN şifresi 10–128 karakter olmalı.")
+        if not isinstance(password, str) or not password or len(password) > 128 or '\n' in password or '\r' in password:
+            raise ValueError("VPN şifresi boş olamaz; en fazla 128 karakter olabilir.")
         return api_operation({"op": "reset_password", "username": username, "password": password})
     except ValueError as exc:
         return jsonify(error=str(exc)), 400
@@ -335,8 +335,8 @@ def api_admin_password():
     try:
         body = json_body()
         current, new = body.get("current", ""), body.get("new", "")
-        if not isinstance(current, str) or not isinstance(new, str) or len(new) < 12 or len(new) > 256:
-            raise ValueError("Yeni panel şifresi 12–256 karakter olmalı.")
+        if not isinstance(current, str) or not isinstance(new, str) or not new or len(new) > 256 or '\n' in new or '\r' in new:
+            raise ValueError("Yeni panel şifresi boş olamaz; en fazla 256 karakter olabilir.")
         con = db()
         try:
             row = con.execute("SELECT password_hash FROM admins WHERE username=?", (session["admin"],)).fetchone()
@@ -379,9 +379,9 @@ def bootstrap():
     username = input("Panel admin username: ").strip()
     if not re.fullmatch(r"[A-Za-z0-9_-]{3,32}", username):
         raise SystemExit("Use 3–32 letters, numbers, underscore or hyphen.")
-    password = getpass.getpass("Panel admin password (12+ characters): ")
-    if len(password) < 12:
-        raise SystemExit("Password must contain at least 12 characters.")
+    password = getpass.getpass("Panel admin password (any non-empty password): ")
+    if not password or len(password) > 256 or '\n' in password or '\r' in password:
+        raise SystemExit("Password must be non-empty and at most 256 characters.")
     con = db()
     try:
         con.execute("INSERT INTO admins(username,password_hash) VALUES(?,?) ON CONFLICT(username) DO UPDATE SET password_hash=excluded.password_hash", (username, generate_password_hash(password)))
