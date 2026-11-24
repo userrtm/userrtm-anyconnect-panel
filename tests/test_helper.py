@@ -71,6 +71,14 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(helper.PASSWD.read_text(), "")
         self.assertEqual(helper.snapshot(helper.load_meta()), [])
 
+    def test_customer_can_use_a_simple_password(self):
+        helper.action({"op": "add_user", "username": "simple", "password": "123", "days": None})
+        self.assertEqual(helper.snapshot(helper.load_meta())[0]["username"], "simple")
+
+    def test_empty_password_is_rejected(self):
+        with self.assertRaises(ValueError):
+            helper.action({"op": "add_user", "username": "simple", "password": "", "days": None})
+
     def test_expiration_locks_account(self):
         helper.action({"op": "add_user", "username": "monthly", "password": "long-password", "days": 30})
         meta = helper.load_meta()

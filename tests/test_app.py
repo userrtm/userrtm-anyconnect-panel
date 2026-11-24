@@ -62,6 +62,17 @@ class PanelRouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("Mevcut", response.get_json()["error"])
 
+    def test_admin_can_change_to_a_simple_password(self):
+        csrf = self.sign_in()
+        response = self.client.post("/api/admin/password", base_url=self.base, json={
+            "current": "correct-horse-battery", "new": "123",
+        }, headers={"X-CSRF-Token": csrf})
+        self.assertEqual(response.status_code, 200)
+        con = panel.db()
+        row = con.execute("SELECT password_hash FROM admins WHERE username='admin'").fetchone()
+        con.close()
+        self.assertTrue(panel.check_password_hash(row["password_hash"], "123"))
+
     def test_customer_profile_url_serves_their_server_profile(self):
         with patch.object(panel, "helper", return_value={"username": "alice", "host": "vpn.example.com", "port": "443"}):
             response = self.client.get("/customer-profile/" + "A" * 43 + ".xml", base_url=self.base)
