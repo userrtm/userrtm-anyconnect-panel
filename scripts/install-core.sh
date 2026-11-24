@@ -65,10 +65,13 @@ settings = {
 }
 found = set()
 for index, line in enumerate(lines):
-    match = re.match(r'^\s*(auth|server-cert|server-key)\s*=', line)
+    match = re.match(r'^\s*(auth|server-cert|server-key|route|no-route)\s*=', line)
     if match:
         key = match.group(1)
-        if key not in found:
+        if key in ('route', 'no-route'):
+            # Existing split routes bypass ordinary Internet traffic.
+            lines[index] = ''
+        elif key not in found:
             lines[index] = settings[key]
             found.add(key)
         else:
@@ -77,6 +80,7 @@ for key, value in settings.items():
     if key not in found:
         lines.append(value)
 lines = [line for line in lines if line]
+lines.append('route = default')
 path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
 PY
   if ! grep -Eq '^\s*device\s*=' /etc/ocserv/ocserv.conf; then
@@ -168,9 +172,23 @@ cat > /usr/local/sbin/ocserv-nat <<'NAT'
 set -e
 WAN_IF="$(ip -4 route get 1.1.1.1 | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')"
 test -n "$WAN_IF"
-iptables -C FORWARD -s 10.20.30.0/24 -o "$WAN_IF" -j ACCEPT 2>/dev/null || iptables -A FORWARD -s 10.20.30.0/24 -o "$WAN_IF" -j ACCEPT
-iptables -C FORWARD -d 10.20.30.0/24 -i "$WAN_IF" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -A FORWARD -d 10.20.30.0/24 -i "$WAN_IF" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
-iptables -t nat -C POSTROUTING -s 10.20.30.0/24 -o "$WAN_IF" -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s 10.20.30.0/24 -o "$WAN_IF" -j MASQUERADE
+VPN_SUBNET="$(python3 - <<'PY'
+from pathlib import Path
+import ipaddress
+import re
+text = Path('/etc/ocserv/ocserv.conf').read_text(encoding='utf-8')
+def setting(name):
+    matches = re.findall(r'^\s*' + name + r'\s*=\s*([^#\s]+)', text, re.M)
+    return matches[-1] if matches else None
+network, mask = setting('ipv4-network'), setting('ipv4-netmask')
+if not network or not mask:
+    raise SystemExit('ocserv ipv4-network or ipv4-netmask is missing')
+print(ipaddress.ip_network(f'{network}/{mask}', strict=False))
+PY
+ )"
+iptables -C FORWARD -s "$VPN_SUBNET" -o "$WAN_IF" -j ACCEPT 2>/dev/null || iptables -A FORWARD -s "$VPN_SUBNET" -o "$WAN_IF" -j ACCEPT
+iptables -C FORWARD -d "$VPN_SUBNET" -i "$WAN_IF" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -A FORWARD -d "$VPN_SUBNET" -i "$WAN_IF" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+iptables -t nat -C POSTROUTING -s "$VPN_SUBNET" -o "$WAN_IF" -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s "$VPN_SUBNET" -o "$WAN_IF" -j MASQUERADE
 NAT
 chmod 0750 /usr/local/sbin/ocserv-nat
 
