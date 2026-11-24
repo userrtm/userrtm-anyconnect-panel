@@ -28,6 +28,14 @@ class InstallerTests(unittest.TestCase):
         self.assertIn('privkey.pem', self.source)
         self.assertIn('/etc/ocserv-panel/vpn-domain', self.source)
 
+    def test_existing_server_is_migrated_to_full_tunnel(self):
+        self.assertIn("lines.append('route = default')", self.source)
+        self.assertIn('server-key|route|no-route', self.source)
+
+    def test_nat_uses_the_configured_vpn_pool(self):
+        self.assertIn("ipaddress.ip_network(f'{network}/{mask}', strict=False)", self.source)
+        self.assertNotIn('10.20.30.0/24 -o "$WAN_IF"', self.source)
+
 
 if __name__ == "__main__":
     unittest.main()
