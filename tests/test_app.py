@@ -1,9 +1,11 @@
 import importlib
+import json
 import os
 import tempfile
 import unittest
 from unittest.mock import patch
 from pathlib import Path
+from types import SimpleNamespace
 
 TEMP = tempfile.TemporaryDirectory()
 os.environ["PANEL_DB"] = str(Path(TEMP.name) / "panel.db")
@@ -69,9 +71,20 @@ class PanelRouteTests(unittest.TestCase):
         self.assertEqual(response.headers["Cache-Control"], "no-store, private")
 
     def test_customer_profile_rejects_revoked_urls(self):
-        with patch.object(panel, "helper", side_effect=ValueError("Profile not found.")):
+        helper_response = SimpleNamespace(
+            returncode=1,
+            stdout=json.dumps({"ok": False, "error": "Profile is inactive or expired."}),
+            stderr="",
+        )
+        with patch.object(panel.subprocess, "run", return_value=helper_response):
             response = self.client.get("/customer-profile/" + "A" * 43 + ".xml", base_url=self.base)
         self.assertEqual(response.status_code, 404)
+
+    def test_customer_profile_hides_internal_errors(self):
+        with patch.object(panel, "helper", side_effect=RuntimeError("/etc/private/path")):
+            response = self.client.get("/customer-profile/" + "A" * 43 + ".xml", base_url=self.base)
+        self.assertEqual(response.status_code, 503)
+        self.assertNotIn(b"/etc/private/path", response.data)
 
 
 if __name__ == "__main__":
