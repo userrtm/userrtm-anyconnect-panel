@@ -191,7 +191,7 @@ RestartSec=3
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/ocserv-panel /etc/ocserv /run
+ReadWritePaths=/var/lib/ocserv-panel /etc/ocserv /etc/ocserv-panel /run
 [Install]
 WantedBy=multi-user.target
 UNIT
