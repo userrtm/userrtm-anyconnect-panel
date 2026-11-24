@@ -45,12 +45,40 @@ mkdir -p /etc/ocserv
 if [[ -f /etc/ocserv/ocserv.conf ]]; then
   cp /etc/ocserv/ocserv.conf "/etc/ocserv/ocserv.conf.backup.$(date +%Y%m%d%H%M%S)"
   echo "Existing ocserv config backed up and preserved."
-  if ! grep -Eq '^\s*server-cert\s*=' /etc/ocserv/ocserv.conf; then
-    printf '\n# Added by the panel installer\nserver-cert = /etc/letsencrypt/live/%s/fullchain.pem\n' "$DOMAIN" >> /etc/ocserv/ocserv.conf
+  # The panel writes customer credentials to this password file. Keep ocserv's
+  # plain authentication source aligned with the file the panel manages.
+  if [[ -s /etc/ocserv/passwd && ! -s /etc/ocserv/ocpasswd ]]; then
+    install -m 0600 /etc/ocserv/passwd /etc/ocserv/ocpasswd
   fi
-  if ! grep -Eq '^\s*server-key\s*=' /etc/ocserv/ocserv.conf; then
-    printf 'server-key = /etc/letsencrypt/live/%s/privkey.pem\n' "$DOMAIN" >> /etc/ocserv/ocserv.conf
-  fi
+  python3 - /etc/ocserv/ocserv.conf "$DOMAIN" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+path = Path(sys.argv[1])
+domain = sys.argv[2]
+lines = path.read_text(encoding='utf-8').splitlines()
+settings = {
+    'auth': 'auth = "plain[passwd=/etc/ocserv/ocpasswd]"',
+    'server-cert': f'server-cert = /etc/letsencrypt/live/{domain}/fullchain.pem',
+    'server-key': f'server-key = /etc/letsencrypt/live/{domain}/privkey.pem',
+}
+found = set()
+for index, line in enumerate(lines):
+    match = re.match(r'^\s*(auth|server-cert|server-key)\s*=', line)
+    if match:
+        key = match.group(1)
+        if key not in found:
+            lines[index] = settings[key]
+            found.add(key)
+        else:
+            lines[index] = ''
+for key, value in settings.items():
+    if key not in found:
+        lines.append(value)
+lines = [line for line in lines if line]
+path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+PY
   if ! grep -Eq '^\s*device\s*=' /etc/ocserv/ocserv.conf; then
     printf '\ndevice = vpns\n' >> /etc/ocserv/ocserv.conf
   fi
@@ -102,6 +130,9 @@ getent group ssl-cert >/dev/null 2>&1 && usermod -aG ssl-cert ocserv-panel || tr
 install -d -o ocserv-panel -g ocserv-panel -m 0750 /var/lib/ocserv-panel
 install -d -o root -g ocserv-panel -m 0750 /etc/ocserv-panel
 install -d -o root -g ocserv-panel -m 0750 /etc/ocserv-panel/tls
+printf '%s\n' "$DOMAIN" > /etc/ocserv-panel/vpn-domain
+chown root:ocserv-panel /etc/ocserv-panel/vpn-domain
+chmod 0640 /etc/ocserv-panel/vpn-domain
 cat > /usr/local/sbin/ocserv-panel-sync-cert <<'SYNC_CERT'
 #!/usr/bin/env bash
 set -Eeuo pipefail
