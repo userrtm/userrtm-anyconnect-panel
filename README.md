@@ -1,6 +1,6 @@
 # UserrTM AnyConnect Panel
 
-**Sürüm: 1.3.0**
+**Sürüm: 1.4.0**
 
 Ubuntu VPS üzerinde OpenConnect (`ocserv`) sunucusunu ve müşteri hesaplarını web panelinden yönetir. Panel telefon ve masaüstüne uyumludur; açık/koyu tema sunar.
 
@@ -15,6 +15,16 @@ bash <(curl -fsSL https://raw.githubusercontent.com/userrtm/userrtm-anyconnect-p
 Kurulum VPN domain'ini, sabit profil/abonelik hostname'ini, Let's Encrypt e-postasını ve panel yöneticisi hesabını sorar. Abonelik hostname'i müşteriye vereceğin sabit adres içindir. Bu domain'in A kaydı profil panelini çalıştıran VPS'e yönlenmeli; TLS sertifikası VPN domain'i ve abonelik domain'i için alınır. Kurulum mevcut kullanıcı verisini korur.
 
 Sağlayıcı güvenlik duvarında 80/TCP (Let's Encrypt), VPN için 443/TCP ve 443/UDP, web paneli için 8443/TCP açık olmalı. Kurulum, VPN IP havuzuna göre NAT/FORWARD kurallarını servisin her açılışında uygular.
+
+## Sürüm 1.4.0
+
+- Yeni müşterinin süresi gün sayısıyla veya takvimden bitiş tarihi seçerek ayarlanabilir; sınırsız seçenek de bulunur.
+- Müşterinin süresi sonradan aynı seçeneklerle değiştirilebilir.
+- Panel dili Türkçe, Rusça veya İngilizce seçilebilir ve seçim tarayıcıda saklanır.
+- Paneldeki işlemler içerikleri arka planda günceller; tam sayfa yenilemesi gerekmez. Panelde açılış, modal, müşteri satırı ve işlem bekleme animasyonları bulunur.
+- Sürüm numarası statik dosya adreslerine eklenir; yeni kurulumdan sonra tarayıcının eski arayüz dosyalarını kullanma ihtimali azaltılır.
+
+Takvimde seçilen tarih, paneli açan yöneticinin yerel saatine göre o günün sonuna kadar geçerlidir. Gün sayısı 1–3650 aralığındadır.
 
 ## Sürüm 1.3.0
 
@@ -70,6 +80,8 @@ Müşteri oluşturma örnek gövdesi:
 ```
 
 `days: null` sınırsız süre demektir. Müşteri oluşturma cevabı `profile_url` döndürür. Tokenı yalnızca TLS üzerinden, güvenilir bayi paneli sunucusunda sakla; bayi panelindeki AnyConnect panel adresi olarak `https://PANEL-DOMAIN:8443`, token olarak `sudo any` menüsünden aldığın değeri kullan.
+
+Müşteri ekleme veya süre güncelleme isteğinde gün yerine `expires_at` alanıyla Unix zaman damgası gönderilebilir; `expires_at: null` süresiz erişim verir.
 
 ## Terminal menüsü
 

@@ -376,7 +376,8 @@ def api_v1_add_customer():
             raise ValueError("VPN password must be non-empty and at most 128 characters.")
         created = helper({
             "op": "add_user", "username": username, "password": password,
-            "days": body.get("days"), "max_same_clients": body.get("max_same_clients", 1),
+            **({"expires_at": body.get("expires_at")} if "expires_at" in body else {"days": body.get("days")}),
+            "max_same_clients": body.get("max_same_clients", 1),
         })
         state = helper({"op": "state"})
         return jsonify({
@@ -411,7 +412,13 @@ def api_v1_customer_status(username):
 @api_token_required
 def api_v1_customer_expiry(username):
     try:
-        days = json_body().get("days")
+        body = json_body()
+        if "expires_at" in body:
+            expires_at = body.get("expires_at")
+            if expires_at is not None and (not isinstance(expires_at, int) or isinstance(expires_at, bool)):
+                raise ValueError("expires_at must be an integer timestamp or null for unlimited.")
+            return api_operation({"op": "set_expiry", "username": username, "expires_at": expires_at})
+        days = body.get("days")
         if days is not None and days != "" and (not isinstance(days, int) or isinstance(days, bool) or not 1 <= days <= 3650):
             raise ValueError("days must be 1–3650 or null for unlimited.")
         return api_operation({"op": "set_expiry", "username": username, "days": days})
@@ -456,7 +463,8 @@ def api_add_user():
             raise ValueError("VPN şifresi boş olamaz; en fazla 128 karakter olabilir.")
         created = helper({
             "op": "add_user", "username": username, "password": password,
-            "days": body.get("days"), "max_same_clients": body.get("max_same_clients", 1),
+            **({"expires_at": body.get("expires_at")} if "expires_at" in body else {"days": body.get("days")}),
+            "max_same_clients": body.get("max_same_clients", 1),
         })
         state = helper({"op": "state"})
         created["profile_url"] = customer_profile_url(created["profile_token"], state.get("settings", {}))
@@ -501,6 +509,11 @@ def api_user_limit(username):
 def api_user_expiry(username):
     try:
         body = json_body()
+        if "expires_at" in body:
+            expires_at = body.get("expires_at")
+            if expires_at is not None and (not isinstance(expires_at, int) or isinstance(expires_at, bool)):
+                raise ValueError("Bitiş tarihi geçerli değil.")
+            return api_operation({"op": "set_expiry", "username": username, "expires_at": expires_at})
         days = body.get("days")
         if days is not None and days != "" and (not isinstance(days, int) or isinstance(days, bool) or not 1 <= days <= 3650):
             raise ValueError("Süre 1–3650 gün arasında veya sınırsız olmalı.")
