@@ -277,14 +277,18 @@ def save_network_settings(req):
     active_endpoint = req.get('active_endpoint', 'primary')
     if active_endpoint not in ('primary', 'backup') or (active_endpoint == 'backup' and not backup_host):
         raise ValueError('Choose a configured primary or backup VPN endpoint.')
-    subscription_base_url = validate_subscription_url(req.get('subscription_base_url', ''))
-    if subscription_base_url:
+    if 'subscription_base_url' in req:
+        subscription_base_url = validate_subscription_url(req['subscription_base_url'])
+        if not subscription_base_url:
+            raise ValueError('Enter the primary HTTPS subscription URL.')
         subscription_host = urlsplit(subscription_base_url).hostname or ''
         panel_cert = Path('/etc/ocserv-panel/tls/fullchain.pem')
         if panel_cert.is_file():
             check = run(['openssl', 'x509', '-in', str(panel_cert), '-noout', '-checkhost', subscription_host])
             if check.returncode:
                 raise ValueError('The panel TLS certificate does not cover this subscription hostname. Set it through sudo any first, after its DNS points to this VPS.')
+    else:
+        subscription_base_url = network_settings()['subscription_base_url']
     payload = {
         'primary_host': primary_host,
         'primary_port': primary_port,
@@ -426,6 +430,8 @@ def customer_profile(token):
 
 def action(req):
     op = req.get('op')
+    if op == 'network':
+        return network_settings()
     if op == 'state':
         meta = load_meta()
         expire_users(meta)
