@@ -356,6 +356,21 @@ def expiry_from_days(days):
     return int(time.time()) + days * 86400
 
 
+def expiry_from_request(req):
+    """Return expiry from unlimited, days, or an explicit Unix timestamp."""
+    if 'expires_at' in req:
+        value = req.get('expires_at')
+        if value is None or value == '':
+            return None
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError('Expiry timestamp must be an integer or null.')
+        now = int(time.time())
+        if not now < value <= now + MAX_EXPIRY:
+            raise ValueError('Expiry date must be in the future and within 10 years.')
+        return value
+    return expiry_from_days(req.get('days'))
+
+
 def snapshot(meta):
     active_entries = users_list()
     users = []
@@ -438,7 +453,7 @@ def action(req):
         meta = load_meta()
         if username in users_list() or username in meta['users']:
             raise ValueError('Customer already exists. Use password reset or re-enable instead.')
-        expires_at = expiry_from_days(req.get('days'))
+        expires_at = expiry_from_request(req)
         set_password(username, password)
         profile_token = secrets.token_urlsafe(32)
         try:
@@ -499,7 +514,7 @@ def action(req):
             enable_entry(username, meta)
         elif op == 'set_expiry':
             previous = record.get('status', 'active')
-            record['expires_at'] = expiry_from_days(req.get('days'))
+            record['expires_at'] = expiry_from_request(req)
             if previous == 'expired' and (record['expires_at'] is None or record['expires_at'] > int(time.time())):
                 enable_entry(username, meta)
         else:
