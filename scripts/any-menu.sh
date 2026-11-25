@@ -28,7 +28,7 @@ try:
     print('Birincil VPN:    %s:%s' % (d.get('primary_host',''), d.get('primary_port',443)))
     print('Yedek VPN:       %s' % ((d.get('backup_host','') + ':' + str(d.get('backup_port',443))) if d.get('backup_host') else 'ayarlı değil'))
     print('Aktif profil:    %s' % d.get('active_endpoint','primary'))
-    print('Abonelik URL:    %s' % (d.get('subscription_base_url') or 'panel adresinden üretiliyor'))
+    print('Ana abonelik URL: %s' % (d.get('subscription_base_url') or 'ayarlı değil'))
 except Exception:
     print('Profil ayarları okunamadı.')
 PY
@@ -143,7 +143,8 @@ save_network() {
   read -rp "Yedek VPN domain/IP (boş bırakılabilir): " backup_host
   read -rp "Yedek VPN portu [443]: " backup_port; backup_port=${backup_port:-443}
   read -rp "Profilde önce gösterilecek uç (primary/backup) [primary]: " active; active=${active:-primary}
-  read -rp "Sabit HTTPS abonelik taban adresi (boş=bu panel adresi): " base
+  read -rp "Ana HTTPS abonelik adresi: " base
+  [[ -n $base ]] || { echo "Ana abonelik adresini gir."; return 1; }
   ensure_subscription_cert "$base" || return 1
   payload="$(python3 - "$primary_host" "$primary_port" "$backup_host" "$backup_port" "$active" "$base" <<'PY'
 import json, sys
