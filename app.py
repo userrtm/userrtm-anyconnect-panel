@@ -38,6 +38,10 @@ class CustomerProfileNotFound(LookupError):
     """A customer profile URL is unknown, disabled, deleted, or expired."""
 
 
+class SubscriptionNotConfigured(ValueError):
+    """Customer creation requires a configured public subscription URL."""
+
+
 def db():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(DB_PATH, timeout=10)
@@ -178,13 +182,23 @@ def api_token_required(fn):
     return wrapped
 
 
-def subscription_base(settings=None):
-    settings = settings or helper({"op": "profile"}).get("network", {})
-    return (settings.get("subscription_base_url") or request.url_root.rstrip("/")).rstrip("/")
+def required_subscription_base():
+    base = helper({"op": "network"})["subscription_base_url"]
+    if not base:
+        raise SubscriptionNotConfigured
+    return base
 
 
-def customer_profile_url(token, settings=None):
-    return f"{subscription_base(settings)}/customer-profile/{token}.xml"
+def customer_profile_url(token, base):
+    return f"{base}/customer-profile/{token}.xml"
+
+
+def add_customer_profile_urls(state):
+    base = state.get("settings", {}).get("subscription_base_url")
+    for user in state.get("users", []):
+        token = user.get("profile_token")
+        if base and token:
+            user["profile_url"] = customer_profile_url(token, base)
 
 
 def json_body():
@@ -299,6 +313,7 @@ def logout():
 def api_state():
     try:
         result = helper({"op": "state"})
+        add_customer_profile_urls(result)
         result["events"] = recent_events()
         return jsonify(result)
     except (RuntimeError, ValueError, OSError, subprocess.TimeoutExpired, sqlite3.Error) as exc:
@@ -351,12 +366,13 @@ def api_v1_save_network():
 def api_v1_customers():
     try:
         state = helper({"op": "state"})
-        settings = state.get("settings", {})
+        add_customer_profile_urls(state)
+        fields = ("username", "status", "expires_at", "created_at", "max_same_clients")
         users = []
         for user in state.get("users", []):
-            item = {key: user.get(key) for key in ("username", "status", "expires_at", "created_at", "max_same_clients")}
-            if user.get("profile_token"):
-                item["profile_url"] = customer_profile_url(user["profile_token"], settings)
+            item = {key: user.get(key) for key in fields}
+            if "profile_url" in user:
+                item["profile_url"] = user["profile_url"]
             users.append(item)
         return jsonify({"customers": users})
     except (RuntimeError, ValueError, OSError, subprocess.TimeoutExpired) as exc:
@@ -374,18 +390,20 @@ def api_v1_add_customer():
             raise ValueError("Username must use 1–32 letters, numbers, underscore or hyphen.")
         if not isinstance(password, str) or not password or len(password) > 128 or "\n" in password or "\r" in password:
             raise ValueError("VPN password must be non-empty and at most 128 characters.")
+        base = required_subscription_base()
         created = helper({
             "op": "add_user", "username": username, "password": password,
             **({"expires_at": body.get("expires_at")} if "expires_at" in body else {"days": body.get("days")}),
             "max_same_clients": body.get("max_same_clients", 1),
         })
-        state = helper({"op": "state"})
         return jsonify({
             "username": username,
             "message": created.get("message", "Customer added."),
-            "profile_url": customer_profile_url(created["profile_token"], state.get("settings", {})),
+            "profile_url": customer_profile_url(created["profile_token"], base),
             "profile_token": created["profile_token"],
         }), 201
+    except SubscriptionNotConfigured:
+        return jsonify(error="Set the primary subscription URL before creating a customer.", code="subscription_not_configured"), 409
     except (RuntimeError, ValueError, KeyError, OSError, subprocess.TimeoutExpired) as exc:
         return jsonify(error=str(exc)), 400
 
@@ -461,15 +479,17 @@ def api_add_user():
         password = body.get("password", "")
         if not isinstance(password, str) or not password or len(password) > 128 or '\n' in password or '\r' in password:
             raise ValueError("VPN şifresi boş olamaz; en fazla 128 karakter olabilir.")
+        base = required_subscription_base()
         created = helper({
             "op": "add_user", "username": username, "password": password,
             **({"expires_at": body.get("expires_at")} if "expires_at" in body else {"days": body.get("days")}),
             "max_same_clients": body.get("max_same_clients", 1),
         })
-        state = helper({"op": "state"})
-        created["profile_url"] = customer_profile_url(created["profile_token"], state.get("settings", {}))
+        created["profile_url"] = customer_profile_url(created["profile_token"], base)
         return jsonify(created), 201
-    except ValueError as exc:
+    except SubscriptionNotConfigured:
+        return jsonify(error="Müşteri oluşturmadan önce ana abonelik adresini kaydet.", code="subscription_not_configured"), 409
+    except (RuntimeError, ValueError, KeyError, OSError, subprocess.TimeoutExpired) as exc:
         return jsonify(error=str(exc)), 400
 
 

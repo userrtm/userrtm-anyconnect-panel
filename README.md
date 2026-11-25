@@ -1,6 +1,6 @@
 # UserrTM AnyConnect Panel
 
-**Sürüm: 1.4.0**
+**Sürüm: 1.4.1**
 
 Ubuntu VPS üzerinde OpenConnect (`ocserv`) sunucusunu ve müşteri hesaplarını web panelinden yönetir. Panel telefon ve masaüstüne uyumludur; açık/koyu tema sunar.
 
@@ -38,13 +38,15 @@ Takvimde seçilen tarih, paneli açan yöneticinin yerel saatine göre o günün
 
 Web panelinde **Ayarlar → Sabit abonelik ve VPN sunucuları** bölümünde şunları gir:
 
-- Sabit abonelik taban adresi, örneğin `https://userrtm.sub.com:8443`
+- Ana abonelik adresi, örneğin `https://userrtm.sub.com:8443`
 - Birincil ve yedek VPN domain/IP ve portları
 - Profilde önce gösterilecek aktif uç
 
 Sabit abonelik domain'i profil XML'ini sunan bu panele gitmeli. Alan adının TLS sertifikasında yoksa `sudo any` menüsünde **Birincil/yedek VPN ve abonelik URL ayarla** seçeneği sertifikayı Let's Encrypt ile genişletir; DNS kaydı önce bu VPS'e yönlenmeli ve doğrulama sırasında TCP 80 boş olmalı.
 
-Müşterinin sabit profil URL'si XML'i açtığında en son kayıtlı aktif VPN ucu ile yedek ucu alır. AnyConnect harici XML URL'sini sürekli takip etmez: aktif ucu panelden değiştirdikten sonra müşteri aynı sabit URL'yi yeniden içe aktarmalıdır. Profilde iki sunucu da önceden varsa müşteri AnyConnect sunucu listesinden yedeği seçebilir.
+Panel ve bayi API'si, yeni müşterinin profil linkini kayıtlı ana abonelik adresiyle oluşturur. Müşteri listesinden kopyalanan link de aynı adresi kullanır. Adres kaydedilene kadar yeni müşteri oluşturulamaz.
+
+VPN ucu değiştiğinde müşteri linki sabit kalır. Link açıldığında XML en son kayıtlı aktif VPN ucunu ve varsa yedek ucu gösterir. Aktif ucu panelden değiştirdikten sonra müşteri aynı URL'yi yeniden içe aktarmalıdır. Profilde iki sunucu da önceden varsa müşteri AnyConnect sunucu listesinden yedeği seçebilir.
 
 Yeni VPS'te aynı müşterinin bağlanabilmesi için o kullanıcı adı ve VPN şifresi yeni VPS'teki AnyConnect sunucusunda da bulunmalıdır. Bu API her paneldeki yerel `ocserv` hesaplarını yönetir; sunucular arasında parola veritabanını kendiliğinden çoğaltmaz. Bayi paneli aynı müşteri hesabını primary ve backup VPS'lerde ayrı ayrı oluşturup yönetmelidir.
 
