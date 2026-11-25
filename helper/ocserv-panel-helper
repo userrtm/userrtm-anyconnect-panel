@@ -10,12 +10,14 @@ import subprocess
 import sys
 import tempfile
 import time
+from urllib.parse import urlsplit
 from pathlib import Path
 
 CONFIG = Path('/etc/ocserv/ocserv.conf')
 PASSWD = Path('/etc/ocserv/ocpasswd')
 USER_CONFIG_DIR = Path('/etc/ocserv/config-per-user')
 META = Path('/etc/ocserv-panel/users.json')
+NETWORK = Path('/var/lib/ocserv-panel/network.json')
 VPN_DOMAIN = Path('/etc/ocserv-panel/vpn-domain')
 USERNAME_RE = re.compile(r'^[A-Za-z0-9_-]{1,32}$')
 MAX_EXPIRY = 10 * 365 * 86400
@@ -181,6 +183,134 @@ def get_settings():
     }
 
 
+def validate_endpoint_host(value, optional=False):
+    if not isinstance(value, str):
+        raise ValueError('VPN endpoint must be a hostname or IP address.')
+    value = value.strip()
+    if not value and optional:
+        return ''
+    if not value or len(value) > 253 or value.startswith('.') or value.endswith('.'):
+        raise ValueError('Enter a valid VPN hostname or IP address.')
+    try:
+        return str(ipaddress.ip_address(value))
+    except ValueError:
+        labels = value.split('.')
+        if any(not re.fullmatch(r'[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?', label) for label in labels):
+            raise ValueError('Enter a valid VPN hostname or IP address.')
+        return value.lower()
+
+
+def validate_endpoint_port(value):
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        raise ValueError('VPN endpoint port must be between 1 and 65535.')
+    if isinstance(value, bool) or not 1 <= port <= 65535:
+        raise ValueError('VPN endpoint port must be between 1 and 65535.')
+    return port
+
+
+def validate_subscription_url(value):
+    if not isinstance(value, str):
+        raise ValueError('Subscription URL must be HTTPS.')
+    value = value.strip()
+    if not value:
+        return ''
+    try:
+        parsed = urlsplit(value)
+        hostname = validate_endpoint_host(parsed.hostname or '')
+        port = parsed.port
+    except (ValueError, TypeError):
+        raise ValueError('Enter an HTTPS subscription base URL, for example https://sub.example.com:8443.')
+    if parsed.scheme != 'https' or not hostname or parsed.username or parsed.password or parsed.path not in ('', '/') or parsed.query or parsed.fragment:
+        raise ValueError('Subscription base URL must be HTTPS and contain only a hostname and optional port.')
+    hostname_url = f'[{hostname}]' if ':' in hostname else hostname
+    return f'https://{hostname_url}' + (f':{port}' if port else '')
+
+
+def network_settings():
+    local = get_settings()
+    default = {
+        'primary_host': local.get('domain', ''),
+        'primary_port': int(local.get('port', '443')),
+        'backup_host': '',
+        'backup_port': int(local.get('port', '443')),
+        'active_endpoint': 'primary',
+        'subscription_base_url': '',
+    }
+    try:
+        saved = json.loads(NETWORK.read_text(encoding='utf-8'))
+    except FileNotFoundError:
+        saved = {}
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError('Network settings file is invalid; use the terminal menu to repair it.') from exc
+    if not isinstance(saved, dict):
+        raise RuntimeError('Network settings file is invalid; use the terminal menu to repair it.')
+    for key in default:
+        if key in saved:
+            default[key] = saved[key]
+    default['primary_host'] = validate_endpoint_host(default['primary_host']) if default['primary_host'] else ''
+    default['primary_port'] = validate_endpoint_port(default['primary_port'])
+    default['backup_host'] = validate_endpoint_host(default['backup_host'], optional=True)
+    default['backup_port'] = validate_endpoint_port(default['backup_port'])
+    if default['active_endpoint'] not in ('primary', 'backup') or (default['active_endpoint'] == 'backup' and not default['backup_host']):
+        default['active_endpoint'] = 'primary'
+    default['subscription_base_url'] = validate_subscription_url(default['subscription_base_url'])
+    return default
+
+
+def profile_endpoints():
+    config = network_settings()
+    candidates = {
+        'primary': {'name': 'UserrTM Primary', 'host': config['primary_host'], 'port': config['primary_port']},
+        'backup': {'name': 'UserrTM Backup', 'host': config['backup_host'], 'port': config['backup_port']},
+    }
+    order = [config['active_endpoint'], 'backup' if config['active_endpoint'] == 'primary' else 'primary']
+    return [candidates[key] for key in order if candidates[key]['host']]
+
+
+def save_network_settings(req):
+    primary_host = validate_endpoint_host(req.get('primary_host', ''))
+    primary_port = validate_endpoint_port(req.get('primary_port', 443))
+    backup_host = validate_endpoint_host(req.get('backup_host', ''), optional=True)
+    backup_port = validate_endpoint_port(req.get('backup_port', 443))
+    active_endpoint = req.get('active_endpoint', 'primary')
+    if active_endpoint not in ('primary', 'backup') or (active_endpoint == 'backup' and not backup_host):
+        raise ValueError('Choose a configured primary or backup VPN endpoint.')
+    subscription_base_url = validate_subscription_url(req.get('subscription_base_url', ''))
+    if subscription_base_url:
+        subscription_host = urlsplit(subscription_base_url).hostname or ''
+        panel_cert = Path('/etc/ocserv-panel/tls/fullchain.pem')
+        if panel_cert.is_file():
+            check = run(['openssl', 'x509', '-in', str(panel_cert), '-noout', '-checkhost', subscription_host])
+            if check.returncode:
+                raise ValueError('The panel TLS certificate does not cover this subscription hostname. Set it through sudo any first, after its DNS points to this VPS.')
+    payload = {
+        'primary_host': primary_host,
+        'primary_port': primary_port,
+        'backup_host': backup_host,
+        'backup_port': backup_port,
+        'active_endpoint': active_endpoint,
+        'subscription_base_url': subscription_base_url,
+    }
+    NETWORK.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix='.network.', dir=str(NETWORK.parent), text=True)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+            f.write('\n')
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(temp_name, 0o640)
+        os.replace(temp_name, NETWORK)
+    finally:
+        try:
+            os.unlink(temp_name)
+        except FileNotFoundError:
+            pass
+    return payload
+
+
 def get_auth_passwd_path(content=None):
     content = content if content is not None else CONFIG.read_text(encoding='utf-8')
     match = re.search(r'^\s*auth\s*=\s*["\']?plain\[passwd=([^\]"\']+)\]["\']?\s*$', content, re.M)
@@ -273,11 +403,10 @@ def customer_profile(token):
     if (record.get('status', 'active') != 'active' or username not in users_list()
             or (expires and int(expires) <= int(time.time()))):
         raise ValueError('Profile is inactive or expired.')
-    settings = get_settings()
-    host = settings['domain']
-    if not host or not re.fullmatch(r'[A-Za-z0-9.-]+', host):
-        raise RuntimeError('Could not determine the VPN hostname from the TLS certificate setting.')
-    return {'username': username, 'host': host, 'port': settings['port']}
+    endpoints = profile_endpoints()
+    if not endpoints:
+        raise RuntimeError('No active VPN endpoint is configured.')
+    return {'username': username, 'endpoints': endpoints, 'network': network_settings()}
 
 
 def action(req):
@@ -288,18 +417,19 @@ def action(req):
         meta = load_meta()
         return {
             'users': snapshot(meta),
-            'settings': get_settings(),
+            'settings': {**get_settings(), **network_settings(), 'endpoints': profile_endpoints()},
             'service': service_status(),
             'logs': run(['journalctl', '-u', 'ocserv', '-n', '40', '--no-pager', '-o', 'cat']).stdout,
         }
     if op == 'profile':
-        settings = get_settings()
-        host = settings['domain']
-        if not host or not re.fullmatch(r'[A-Za-z0-9.-]+', host):
-            raise RuntimeError('Could not determine the VPN hostname from the TLS certificate setting.')
-        return {'host': host, 'port': settings['port']}
+        endpoints = profile_endpoints()
+        if not endpoints:
+            raise RuntimeError('No active VPN endpoint is configured.')
+        return {'endpoints': endpoints, 'network': network_settings()}
     if op == 'customer_profile':
         return customer_profile(req.get('token'))
+    if op == 'save_network':
+        return {'message': 'VPN profile endpoints saved.', 'settings': save_network_settings(req)}
     if op == 'add_user':
         username, password = req.get('username', ''), req.get('password', '')
         validate_username(username)
