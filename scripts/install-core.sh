@@ -8,9 +8,11 @@ APP_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VPN_PORT=443
 PANEL_PORT=8443
 read -rp "VPN domain (for example vpn.example.com): " DOMAIN
+read -rp "Stable profile/subscription hostname [${DOMAIN}]: " SUBSCRIPTION_HOST
+SUBSCRIPTION_HOST="${SUBSCRIPTION_HOST:-$DOMAIN}"
 read -rp "Let's Encrypt email: " EMAIL
 
-if [[ ! "$DOMAIN" =~ ^[A-Za-z0-9.-]+$ ]]; then echo "Invalid domain."; exit 1; fi
+if [[ ! "$DOMAIN" =~ ^[A-Za-z0-9.-]+$ || ! "$SUBSCRIPTION_HOST" =~ ^[A-Za-z0-9.-]+$ ]]; then echo "Invalid domain."; exit 1; fi
 
 echo "Installing packages..."
 export DEBIAN_FRONTEND=noninteractive
@@ -26,14 +28,23 @@ if ss -H -lntup "sport = :${VPN_PORT}" 2>/dev/null | grep -q .; then
   fi
 fi
 
+CERT_DOMAINS=(-d "$DOMAIN")
+[[ "$SUBSCRIPTION_HOST" == "$DOMAIN" ]] || CERT_DOMAINS+=(-d "$SUBSCRIPTION_HOST")
 if [[ ! -f "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem" ]]; then
   if ss -H -lnt 'sport = :80' 2>/dev/null | grep -q .; then
     echo "Port 80 is in use; stop its service before requesting the certificate."
     exit 1
   fi
-  certbot certonly --standalone --non-interactive --agree-tos --email "$EMAIL" -d "$DOMAIN"
+  certbot certonly --standalone --non-interactive --agree-tos --email "$EMAIL" "${CERT_DOMAINS[@]}"
 else
-  echo "Using existing Let's Encrypt certificate for ${DOMAIN}."
+  if ! openssl x509 -in "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem" -noout -checkhost "$SUBSCRIPTION_HOST" >/dev/null 2>&1; then
+    if ss -H -lnt 'sport = :80' 2>/dev/null | grep -q .; then
+      echo "Port 80 is in use; stop its service before extending the certificate."; exit 1
+    fi
+    certbot certonly --standalone --non-interactive --agree-tos --email "$EMAIL" --expand --cert-name "$DOMAIN" "${CERT_DOMAINS[@]}"
+  else
+    echo "Using existing Let's Encrypt certificate for ${DOMAIN} and ${SUBSCRIPTION_HOST}."
+  fi
 fi
 
 if ss -H -lnt "sport = :${PANEL_PORT}" 2>/dev/null | grep -q .; then
@@ -127,6 +138,7 @@ SYSCTL
 sysctl --system >/dev/null
 
 install -m 0755 "$APP_SRC/helper/ocserv-panel-helper" /usr/local/sbin/ocserv-panel-helper
+install -m 0755 "$APP_SRC/scripts/any-menu.sh" /usr/local/bin/any
 cat > /etc/sudoers.d/ocserv-panel <<'SUDOERS'
 ocserv-panel ALL=(root) NOPASSWD: /usr/local/sbin/ocserv-panel-helper
 SUDOERS
@@ -141,6 +153,21 @@ install -d -o root -g ocserv-panel -m 0750 /etc/ocserv-panel/tls
 printf '%s\n' "$DOMAIN" > /etc/ocserv-panel/vpn-domain
 chown root:ocserv-panel /etc/ocserv-panel/vpn-domain
 chmod 0640 /etc/ocserv-panel/vpn-domain
+if [[ ! -s /var/lib/ocserv-panel/network.json ]]; then
+  python3 - "$DOMAIN" "$VPN_PORT" "$SUBSCRIPTION_HOST" "$PANEL_PORT" <<'PY'
+import json, os, sys, tempfile
+from pathlib import Path
+path=Path('/var/lib/ocserv-panel/network.json')
+data={'primary_host':sys.argv[1],'primary_port':int(sys.argv[2]),'backup_host':'','backup_port':int(sys.argv[2]),'active_endpoint':'primary','subscription_base_url':f'https://{sys.argv[3]}:{sys.argv[4]}'}
+fd,name=tempfile.mkstemp(prefix='.network.',dir=str(path.parent),text=True)
+with os.fdopen(fd,'w',encoding='utf-8') as f:
+    json.dump(data,f,ensure_ascii=False,indent=2); f.write('\n'); f.flush(); os.fsync(f.fileno())
+os.chmod(name,0o640); os.replace(name,path)
+PY
+fi
+if [[ ! -s /etc/ocserv-panel/api-token ]]; then openssl rand -hex 32 > /etc/ocserv-panel/api-token; fi
+chown root:ocserv-panel /etc/ocserv-panel/api-token /var/lib/ocserv-panel/network.json
+chmod 0640 /etc/ocserv-panel/api-token /var/lib/ocserv-panel/network.json
 cat > /usr/local/sbin/ocserv-panel-sync-cert <<'SYNC_CERT'
 #!/usr/bin/env bash
 set -Eeuo pipefail

@@ -1,61 +1,95 @@
 # UserrTM AnyConnect Panel
 
-**Sürüm: 1.2.0**
+**Sürüm: 1.3.0**
 
-Ubuntu VPS üzerinde OpenConnect (`ocserv`) sunucusunu ve VPN müşteri hesaplarını web panelinden yönetir. Yönetim ekranı masaüstü ve telefonda çalışır; açık ve koyu görünüm sunar.
+Ubuntu VPS üzerinde OpenConnect (`ocserv`) sunucusunu ve müşteri hesaplarını web panelinden yönetir. Panel telefon ve masaüstüne uyumludur; açık/koyu tema sunar.
 
 ## Tek komutla kurulum
 
-Ubuntu VPS'e root olarak SSH ile bağlan ve şu komutu çalıştır:
+Ubuntu VPS'e root olarak SSH ile bağlan:
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/userrtm/userrtm-anyconnect-panel/main/install.sh)
 ```
 
-Kurulum yalnızca VPN servisini ve yönetim panelini kurar; müşteri hesabı kurulum sırasında oluşturulmaz. Kurulum alan adını, Let's Encrypt e-posta adresini ve panel yöneticisi için kullanıcı adı ile parolayı sorar. Boş parola kabul edilmez; başka bir minimum karakter zorunluluğu yoktur. Panel açıldıktan sonra müşterileri **Müşteriler → Müşteri ekle** bölümünden oluşturursun. İstersen panel güvenli VPN şifresi üretir. İşlem tamamlanınca panel adresini terminalde gösterir:
+Kurulum VPN domain'ini, sabit profil/abonelik hostname'ini, Let's Encrypt e-postasını ve panel yöneticisi hesabını sorar. Abonelik hostname'i müşteriye vereceğin sabit adres içindir. Bu domain'in A kaydı profil panelini çalıştıran VPS'e yönlenmeli; TLS sertifikası VPN domain'i ve abonelik domain'i için alınır. Kurulum mevcut kullanıcı verisini korur.
 
-```text
-https://ALAN_ADIN:8443
+Sağlayıcı güvenlik duvarında 80/TCP (Let's Encrypt), VPN için 443/TCP ve 443/UDP, web paneli için 8443/TCP açık olmalı. Kurulum, VPN IP havuzuna göre NAT/FORWARD kurallarını servisin her açılışında uygular.
+
+## Sürüm 1.3.0
+
+- Ayrı, sabit abonelik taban adresi: müşteri profil linkleri panel alan adı/VPN uç domain'inden bağımsız kalır.
+- Birincil ve yedek VPN domain/IP ile port tanımlama; XML profilinde ikisi de gösterilir, seçilen aktif uç ilk sırada yer alır.
+- Token korumalı REST API: bayi/satıcı panelinden müşteri ve AnyConnect sunucusu yönetimi.
+- `sudo any` terminal menüsü: durum, uç/abonelik ayarları, panel yönetici adı/şifresi, web portu, API tokenı ve kaldırma.
+- Panel sürümü arayüzde ve `VERSION` dosyasında tutulur.
+
+## Sabit abonelik ve yedek VPN
+
+Web panelinde **Ayarlar → Sabit abonelik ve VPN sunucuları** bölümünde şunları gir:
+
+- Sabit abonelik taban adresi, örneğin `https://userrtm.sub.com:8443`
+- Birincil ve yedek VPN domain/IP ve portları
+- Profilde önce gösterilecek aktif uç
+
+Sabit abonelik domain'i profil XML'ini sunan bu panele gitmeli. Alan adının TLS sertifikasında yoksa `sudo any` menüsünde **Birincil/yedek VPN ve abonelik URL ayarla** seçeneği sertifikayı Let's Encrypt ile genişletir; DNS kaydı önce bu VPS'e yönlenmeli ve doğrulama sırasında TCP 80 boş olmalı.
+
+Müşterinin sabit profil URL'si XML'i açtığında en son kayıtlı aktif VPN ucu ile yedek ucu alır. AnyConnect harici XML URL'sini sürekli takip etmez: aktif ucu panelden değiştirdikten sonra müşteri aynı sabit URL'yi yeniden içe aktarmalıdır. Profilde iki sunucu da önceden varsa müşteri AnyConnect sunucu listesinden yedeği seçebilir.
+
+Yeni VPS'te aynı müşterinin bağlanabilmesi için o kullanıcı adı ve VPN şifresi yeni VPS'teki AnyConnect sunucusunda da bulunmalıdır. Bu API her paneldeki yerel `ocserv` hesaplarını yönetir; sunucular arasında parola veritabanını kendiliğinden çoğaltmaz. Bayi paneli aynı müşteri hesabını primary ve backup VPS'lerde ayrı ayrı oluşturup yönetmelidir.
+
+## Satıcı/bayi API'si
+
+API tokenı yerel terminalde yönetilir:
+
+```bash
+sudo any
 ```
 
-Alan adının A kaydı VPS IP'sine yönlenmelidir. VPS sağlayıcısının güvenlik duvarında 80/TCP (sertifika), 443/TCP ve 443/UDP (VPN), 8443/TCP (web paneli) açık olmalıdır. Güncelleme mevcut ocserv ayarını yedekler; panelin kullandığı VPN parola dosyası ile ocserv ayarını ve VPN sertifika alan adını eşitler. NAT ve yönlendirme kuralları ocserv'deki VPN IP havuzundan otomatik hesaplanır, servis her başladığında tekrar uygulanır. Panelin kurulu sürümü sol menüde ve sayfa altında görünür; her yayın için `VERSION` dosyası güncellenir.
+Menüden **Seller API tokenını göster** seçeneği tokenı ekrana verir; **yenile** eski tokenı hemen geçersiz kılar. Tokenı yalnızca bayi panelinin gizli sunucu ayarına kaydet; URL, tarayıcı kodu, GitHub veya müşteri profil linkine koyma. API isteklerinde `Authorization: Bearer TOKEN` başlığını kullan.
 
-## Sürüm 1.2.0
+Temel adres: `https://PANEL-DOMAIN:8443/api/v1`
 
-- VPN IP havuzundan hesaplanan NAT ve FORWARD kuralları her sunucu başlangıcında uygulanır.
-- Her müşteri için 1–4 eşzamanlı AnyConnect bağlantısı seçilebilir ve panelden değiştirilebilir.
-- Panel sürümü arayüzde gösterilir.
+| İşlem | Yöntem ve uç |
+|---|---|
+| Bağlantı/sürüm/uç durumu | `GET /health` |
+| Birincil/yedek ağ ayarları | `GET /network` |
+| Uç ayarlarını değiştir | `POST /network` |
+| Müşteri listesi | `GET /customers` |
+| Müşteri oluştur | `POST /customers` |
+| Müşteriyi sil | `DELETE /customers/{username}` |
+| Etkin/devre dışı | `POST /customers/{username}/status` |
+| Süre | `POST /customers/{username}/expiry` |
+| Cihaz limiti (1–4) | `POST /customers/{username}/limit` |
+| VPN parolası | `POST /customers/{username}/password` |
 
-## Panel özellikleri
+Müşteri oluşturma örnek gövdesi:
 
-- VPN müşterisi ekleme, kalıcı silme, geçici olarak devre dışı bırakma ve yeniden etkinleştirme
-- 1–3650 gün süreli hesap veya sınırsız hesap oluşturma; abonelik bitişini değiştirme
-- Süresi dolan hesabı otomatik devre dışı bırakma (beş dakikada bir denetim)
-- Müşteri VPN şifresini yenileme (boş olmayan, en fazla 128 karakter)
-- `ocserv` servis durumu, yapılandırma kontrolü, yeniden başlatma ve son günlük kayıtları
-- DNS sunucularını değiştirme; değişiklikten önce yedek alma ve yapılandırma doğrulama
-- Yönetici panel parolasını değiştirme
-- Her müşteri için 1–4 arası eşzamanlı bağlantı sınırı; kullanıcı oluştururken seçilebilir ve sonradan değiştirilebilir
-- Her müşteri için ayrı, rastgele korunan ve hesap devre dışı bırakılınca veya silinince geçersiz olan Cisco Secure Client XML profil URL'si
-- Müşteri eklerken VPN şifresi üretme; müşteri profil adresini panelden kopyalama
-- Müşteri oluşturma tamamlanınca listeyi anında yenileme, satırı vurgulama ve yönetici hareketini kaydetme
-- Ayrı içerikli gezinme menüleri, son yönetici hareketleri ve VPN günlükleri
-- Eksik VPN parola dosyası veya tanınmayan sertifika alan adı için panel uyarısı
-- Açık/koyu tema ve telefon ekranına uyumlu görünüm
+```json
+{"username":"musteri01","password":"vpn-secret","days":30,"max_same_clients":1}
+```
 
-Müşteri oluşturulduktan sonra satırındaki **URI'yi kopyala** düğmesine bas. Müşteri Cisco Secure Client uygulamasında **Profile Management → Import Profile → Network Location (URI)** yolunu izleyip kendisine gönderdiğin bu özel adresi ekler. Profil VPN sunucu adresini ekler; bağlanırken kendi müşteri kullanıcı adı ve VPN şifresini ayrıca girer. Panel yöneticisi parolası Cisco Secure Client’ta kullanılmaz. Hesap devre dışı bırakılır, süresi biter veya silinirse özel profil URL'si çalışmaz. `/profile.xml` yönetici genel profilidir; müşterilere kişiye özel URL gönder.
+`days: null` sınırsız süre demektir. Müşteri oluşturma cevabı `profile_url` döndürür. Tokenı yalnızca TLS üzerinden, güvenilir bayi paneli sunucusunda sakla; bayi panelindeki AnyConnect panel adresi olarak `https://PANEL-DOMAIN:8443`, token olarak `sudo any` menüsünden aldığın değeri kullan.
 
-## Güvenlik ve sınırlar
+## Terminal menüsü
 
-Panel root olarak web isteği çalıştırmaz. Ayrı servis kullanıcısı, CSRF koruması ve yalnızca tanımlı `ocserv-panel-helper` işlemlerine izin veren sudo kuralı kullanır. VPN parola dosyası ve müşteri durumu root tarafından korunur. Profilde görünen sunucu adı VPN sertifikasındaki alan adıyla eşleşir. Panel TLS'i Let's Encrypt ile sağlanır; sertifika yenilendiğinde VPN ve panel servisleri yeniden başlatılır.
+`sudo any` seçenekleri panel/VPN durumunu gösterir; primary/backup VPN uçlarını ve sabit abonelik URL'sini ayarlar; panel kullanıcı adı/şifresi ile web portunu değiştirir; API tokenını gösterir veya yeniler. Kaldırma seçeneği ayrıca `DELETE ANYCONNECT PANEL` yazılı onayı ister ve bu VPS'teki paneli, `ocserv` yapılandırmasını ve VPN hesap verilerini siler.
 
-Cihaz sınırı aynı kullanıcı hesabıyla izin verilen eşzamanlı VPN oturumu sayısını kontrol eder. Örneğin sınır 1 ise ikinci bağlantı reddedilir; ilk cihazın bağlantısı kapandıktan sonra başka bir cihaz bağlanabilir. Bu özellik fiziksel cihaz/HWID kaydı değildir. Panel kullanıcı kotası, ödeme alma, bayi/alt yönetici rolleri, uygulama içinden otomatik abonelik ödemesi veya farklı sunucuları tek merkezden yönetme özelliklerini içermez. Paneli yalnızca güvendiğin yöneticilerle paylaş; 8443/TCP erişimini sağlayıcı güvenlik duvarında kısıtlayabiliyorsan yönetici IP'lerine sınırla.
+## Profil ve oturum limiti
 
-## Geliştirme ve kontroller
+Müşteri oluşturulduğunda panel kişiye özel, iptal edilebilir XML profil URL'sini üretir. Cisco Secure Client'ta **Profile Management → Import Profile → Network Location (URI)** yoluyla eklenir. Cisco Android uygulaması kullanıcı adı ve şifreyi bu XML profilinden almaz ve parolayı kalıcı kaydetmez; müşteri VPN giriş bilgilerini bağlantı sırasında girer. Profil URL'si bağlantı bilgisi içermeyen, erişim anahtarı niteliğinde özel bir linktir.
+
+1–4 eşzamanlı oturum sınırı müşteri başına uygulanır. Bu fiziksel cihaz/HWID kilidi değildir. Hesap devre dışı bırakılır, süresi dolar veya silinirse kişisel profil linki geçersizleşir.
+
+## Güvenlik
+
+Web servisi ayrı, yetkileri sınırlı kullanıcıyla çalışır; root işlemleri sabit izinli helper üzerinden yapılır. API tokenı `/etc/ocserv-panel/api-token` içinde `root:ocserv-panel`, `0640` izinleriyle tutulur. Paneli yalnızca güvendiğin yöneticiler ve bayi sistemleriyle kullan. Mümkünse 8443/TCP'yi sağlayıcı güvenlik duvarında yönetici IP'lerine sınırla.
+
+## Geliştirme
 
 ```bash
 python3 -m unittest discover -s tests -v
 python3 -m py_compile app.py helper/ocserv-panel-helper
-bash -n install.sh scripts/install-core.sh
+bash -n install.sh scripts/install-core.sh scripts/any-menu.sh
 node --check static/app.js
 ```

@@ -18,6 +18,7 @@ HELPER = "/usr/local/sbin/ocserv-panel-helper"
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
 VERSION_FILE = Path(__file__).with_name("VERSION")
 PANEL_VERSION = VERSION_FILE.read_text(encoding="utf-8").strip() if VERSION_FILE.is_file() else "dev"
+API_TOKEN_FILE = Path("/etc/ocserv-panel/api-token")
 
 app = Flask(__name__)
 secret_path = Path("/etc/ocserv-panel/secret_key")
@@ -57,6 +58,7 @@ EVENT_LABELS = {
     "reset_password": "VPN parolası yenilendi",
     "save_dns": "DNS ayarları değiştirildi",
     "restart": "VPN servisi yeniden başlatıldı",
+    "save_network": "Abonelik ve VPN uçları güncellendi",
 }
 
 
@@ -123,6 +125,8 @@ def csrf_token():
 
 @app.before_request
 def protect_posts():
+    if request.path.startswith("/api/v1/"):
+        return None
     if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
         expected = session.get("csrf", "")
         supplied = request.headers.get("X-CSRF-Token", "")
@@ -154,6 +158,33 @@ def login_required(fn):
             return jsonify(error="Please sign in again."), 401
         return fn(*args, **kwargs)
     return wrapped
+
+
+def api_token_required(fn):
+    @wraps(fn)
+    def wrapped(*args, **kwargs):
+        try:
+            expected = API_TOKEN_FILE.read_text(encoding="utf-8").strip()
+        except OSError:
+            expected = ""
+        supplied = request.headers.get("Authorization", "")
+        if supplied.startswith("Bearer "):
+            supplied = supplied[7:].strip()
+        else:
+            supplied = ""
+        if not expected or not supplied or not secrets.compare_digest(supplied, expected):
+            return jsonify(error="Invalid API token."), 401
+        return fn(*args, **kwargs)
+    return wrapped
+
+
+def subscription_base(settings=None):
+    settings = settings or helper({"op": "profile"}).get("network", {})
+    return (settings.get("subscription_base_url") or request.url_root.rstrip("/")).rstrip("/")
+
+
+def customer_profile_url(token, settings=None):
+    return f"{subscription_base(settings)}/customer-profile/{token}.xml"
 
 
 def json_body():
@@ -189,21 +220,24 @@ def client_profile():
     """Serve a minimal Cisco Secure Client server-list profile for URI import."""
     try:
         details = helper({"op": "profile"})
-        body = build_profile(details["host"], details.get("port", "443"), details["host"])
+        body = build_profile(details["endpoints"])
         return Response(body, mimetype="application/xml", headers={"Cache-Control": "no-store", "Content-Disposition": 'inline; filename="UserrTM-AnyConnect.xml"'})
     except (RuntimeError, KeyError, TypeError, subprocess.TimeoutExpired) as exc:
         return Response(str(exc), status=503, mimetype="text/plain", headers={"Cache-Control": "no-store"})
 
 
-def build_profile(host, port, display_name):
+def build_profile(endpoints):
     namespace = "http://schemas.xmlsoap.org/encoding/"
     ET.register_namespace("", namespace)
     root = ET.Element(f"{{{namespace}}}AnyConnectProfile")
     servers = ET.SubElement(root, f"{{{namespace}}}ServerList")
-    entry = ET.SubElement(servers, f"{{{namespace}}}HostEntry")
-    ET.SubElement(entry, f"{{{namespace}}}HostName").text = display_name
-    port = str(port)
-    ET.SubElement(entry, f"{{{namespace}}}HostAddress").text = host if port == "443" else f"{host}:{port}"
+    for endpoint in endpoints:
+        host = endpoint["host"]
+        port = int(endpoint.get("port", 443))
+        entry = ET.SubElement(servers, f"{{{namespace}}}HostEntry")
+        ET.SubElement(entry, f"{{{namespace}}}HostName").text = endpoint.get("name") or host
+        address = f"[{host}]" if ":" in host and not host.startswith("[") else host
+        ET.SubElement(entry, f"{{{namespace}}}HostAddress").text = address if port == 443 else f"{address}:{port}"
     return b'<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(root, encoding="utf-8")
 
 
@@ -212,7 +246,7 @@ def customer_profile(token):
     """Serve a private, revocable Cisco Secure Client profile URL per customer."""
     try:
         details = helper({"op": "customer_profile", "token": token})
-        body = build_profile(details["host"], details.get("port", "443"), details["host"])
+        body = build_profile(details["endpoints"])
         return Response(body, mimetype="application/xml", headers={
             "Cache-Control": "no-store, private",
             "Content-Disposition": f'inline; filename="{details["username"]}.xml"',
@@ -271,6 +305,144 @@ def api_state():
         return jsonify(error=str(exc)), 400
 
 
+@app.get("/api/v1/health")
+@api_token_required
+def api_v1_health():
+    try:
+        state = helper({"op": "state"})
+        return jsonify({
+            "ok": True,
+            "version": PANEL_VERSION,
+            "service": state.get("service", {}),
+            "endpoints": state.get("settings", {}).get("endpoints", []),
+            "active_endpoint": state.get("settings", {}).get("active_endpoint", "primary"),
+        })
+    except (RuntimeError, ValueError, OSError, subprocess.TimeoutExpired) as exc:
+        return jsonify(error=str(exc)), 400
+
+
+@app.get("/api/v1/network")
+@api_token_required
+def api_v1_network():
+    try:
+        state = helper({"op": "state"})
+        settings = state.get("settings", {})
+        return jsonify({key: settings.get(key) for key in (
+            "primary_host", "primary_port", "backup_host", "backup_port",
+            "active_endpoint", "subscription_base_url", "endpoints",
+        )})
+    except (RuntimeError, ValueError, OSError, subprocess.TimeoutExpired) as exc:
+        return jsonify(error=str(exc)), 400
+
+
+@app.post("/api/v1/network")
+@api_token_required
+def api_v1_save_network():
+    try:
+        body = json_body()
+        body.pop("op", None)
+        return jsonify(helper({"op": "save_network", **body}))
+    except (RuntimeError, ValueError, OSError, subprocess.TimeoutExpired) as exc:
+        return jsonify(error=str(exc)), 400
+
+
+@app.get("/api/v1/customers")
+@api_token_required
+def api_v1_customers():
+    try:
+        state = helper({"op": "state"})
+        settings = state.get("settings", {})
+        users = []
+        for user in state.get("users", []):
+            item = {key: user.get(key) for key in ("username", "status", "expires_at", "created_at", "max_same_clients")}
+            if user.get("profile_token"):
+                item["profile_url"] = customer_profile_url(user["profile_token"], settings)
+            users.append(item)
+        return jsonify({"customers": users})
+    except (RuntimeError, ValueError, OSError, subprocess.TimeoutExpired) as exc:
+        return jsonify(error=str(exc)), 400
+
+
+@app.post("/api/v1/customers")
+@api_token_required
+def api_v1_add_customer():
+    try:
+        body = json_body()
+        username = body.get("username", "")
+        password = body.get("password", "")
+        if not isinstance(username, str) or not USERNAME_RE.fullmatch(username):
+            raise ValueError("Username must use 1–32 letters, numbers, underscore or hyphen.")
+        if not isinstance(password, str) or not password or len(password) > 128 or "\n" in password or "\r" in password:
+            raise ValueError("VPN password must be non-empty and at most 128 characters.")
+        created = helper({
+            "op": "add_user", "username": username, "password": password,
+            "days": body.get("days"), "max_same_clients": body.get("max_same_clients", 1),
+        })
+        state = helper({"op": "state"})
+        return jsonify({
+            "username": username,
+            "message": created.get("message", "Customer added."),
+            "profile_url": customer_profile_url(created["profile_token"], state.get("settings", {})),
+            "profile_token": created["profile_token"],
+        }), 201
+    except (RuntimeError, ValueError, KeyError, OSError, subprocess.TimeoutExpired) as exc:
+        return jsonify(error=str(exc)), 400
+
+
+@app.delete("/api/v1/customers/<username>")
+@api_token_required
+def api_v1_delete_customer(username):
+    return api_operation({"op": "delete_user", "username": username})
+
+
+@app.post("/api/v1/customers/<username>/status")
+@api_token_required
+def api_v1_customer_status(username):
+    try:
+        active = json_body().get("active")
+        if not isinstance(active, bool):
+            raise ValueError("active must be true or false.")
+        return api_operation({"op": "enable_user" if active else "disable_user", "username": username})
+    except ValueError as exc:
+        return jsonify(error=str(exc)), 400
+
+
+@app.post("/api/v1/customers/<username>/expiry")
+@api_token_required
+def api_v1_customer_expiry(username):
+    try:
+        days = json_body().get("days")
+        if days is not None and days != "" and (not isinstance(days, int) or isinstance(days, bool) or not 1 <= days <= 3650):
+            raise ValueError("days must be 1–3650 or null for unlimited.")
+        return api_operation({"op": "set_expiry", "username": username, "days": days})
+    except ValueError as exc:
+        return jsonify(error=str(exc)), 400
+
+
+@app.post("/api/v1/customers/<username>/limit")
+@api_token_required
+def api_v1_customer_limit(username):
+    try:
+        limit = json_body().get("max_same_clients")
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 4:
+            raise ValueError("max_same_clients must be between 1 and 4.")
+        return api_operation({"op": "set_limit", "username": username, "max_same_clients": limit})
+    except ValueError as exc:
+        return jsonify(error=str(exc)), 400
+
+
+@app.post("/api/v1/customers/<username>/password")
+@api_token_required
+def api_v1_customer_password(username):
+    try:
+        password = json_body().get("password", "")
+        if not isinstance(password, str) or not password or len(password) > 128 or "\n" in password or "\r" in password:
+            raise ValueError("VPN password must be non-empty and at most 128 characters.")
+        return api_operation({"op": "reset_password", "username": username, "password": password})
+    except ValueError as exc:
+        return jsonify(error=str(exc)), 400
+
+
 @app.post("/api/users")
 @login_required
 def api_add_user():
@@ -282,10 +454,13 @@ def api_add_user():
         password = body.get("password", "")
         if not isinstance(password, str) or not password or len(password) > 128 or '\n' in password or '\r' in password:
             raise ValueError("VPN şifresi boş olamaz; en fazla 128 karakter olabilir.")
-        return api_operation({
+        created = helper({
             "op": "add_user", "username": username, "password": password,
             "days": body.get("days"), "max_same_clients": body.get("max_same_clients", 1),
         })
+        state = helper({"op": "state"})
+        created["profile_url"] = customer_profile_url(created["profile_token"], state.get("settings", {}))
+        return jsonify(created), 201
     except ValueError as exc:
         return jsonify(error=str(exc)), 400
 
@@ -377,6 +552,18 @@ def api_dns():
         body = json_body()
         return api_operation({"op": "save_dns", "dns": body.get("dns", [])})
     except ValueError as exc:
+        return jsonify(error=str(exc)), 400
+
+
+@app.post("/api/profile-settings")
+@login_required
+def api_profile_settings():
+    try:
+        body = json_body()
+        body.pop("op", None)
+        result = helper({"op": "save_network", **body})
+        return jsonify(result)
+    except (RuntimeError, ValueError, OSError, subprocess.TimeoutExpired) as exc:
         return jsonify(error=str(exc)), 400
 
 
