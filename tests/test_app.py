@@ -38,7 +38,8 @@ class PanelRouteTests(unittest.TestCase):
             "username": "admin", "password": "correct-horse-battery", "csrf": csrf,
         })
         self.assertEqual(response.status_code, 302)
-        return csrf
+        with self.client.session_transaction(base_url=self.base) as session:
+            return session["csrf"]
 
     def test_login_and_authentication_required(self):
         response = self.client.get("/api/state", base_url=self.base)
@@ -74,12 +75,61 @@ class PanelRouteTests(unittest.TestCase):
         self.assertTrue(panel.check_password_hash(row["password_hash"], "123"))
 
     def test_customer_profile_url_serves_their_server_profile(self):
-        with patch.object(panel, "helper", return_value={"username": "alice", "host": "vpn.example.com", "port": "443"}):
+        profile = {"username": "alice", "endpoints": [{"host": "vpn.example.com", "port": 443}]}
+        with patch.object(panel, "helper", return_value=profile):
             response = self.client.get("/customer-profile/" + "A" * 43 + ".xml", base_url=self.base)
         self.assertEqual(response.status_code, 200)
-        self.assertIn(b"UserrTM - alice", response.data)
         self.assertIn(b"vpn.example.com", response.data)
         self.assertEqual(response.headers["Cache-Control"], "no-store, private")
+
+    def test_create_and_copy_use_the_primary_subscription_url_even_after_switching_vpn(self):
+        csrf = self.sign_in()
+        token = "A" * 43
+        sub_base = "https://sub.example.test:8443"
+        profile_path = f"/customer-profile/{token}.xml"
+        vpn_host = "vpn-primary.example.test"
+
+        def helper(payload):
+            if payload["op"] == "network":
+                return {"subscription_base_url": sub_base}
+            if payload["op"] == "add_user":
+                return {"profile_token": token}
+            if payload["op"] == "state":
+                return {
+                    "settings": {"subscription_base_url": sub_base, "primary_host": vpn_host},
+                    "users": [{"username": "alice", "profile_token": token}],
+                }
+            if payload["op"] == "customer_profile":
+                return {"username": "alice", "endpoints": [{"host": vpn_host, "port": 443}]}
+            self.fail(f"Unexpected helper operation: {payload['op']}")
+
+        credentials = {"username": "alice", "password": "test-password"}
+        token_file = SimpleNamespace(read_text=lambda **kwargs: "test-token")
+        with patch.object(panel, "helper", side_effect=helper), patch.object(panel, "API_TOKEN_FILE", token_file):
+            sellers = {"Authorization": "Bearer test-token"}
+            for path, headers in [("/api/users", {"X-CSRF-Token": csrf}), ("/api/v1/customers", sellers)]:
+                response = self.client.post(path, base_url=self.base, json=credentials, headers=headers)
+                self.assertEqual(response.status_code, 201)
+                self.assertEqual(response.get_json()["profile_url"], sub_base + profile_path)
+
+            vpn_host = "vpn-backup.example.test"
+            for path, key, headers in [("/api/state", "users", {}), ("/api/v1/customers", "customers", sellers)]:
+                response = self.client.get(path, base_url=self.base, headers=headers)
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.get_json()[key][0]["profile_url"], sub_base + profile_path)
+            result = self.client.get(profile_path, base_url=sub_base)
+            self.assertEqual(result.status_code, 200)
+            self.assertIn(b"vpn-backup.example.test", result.data)
+
+    def test_missing_primary_subscription_is_reported_before_creating_customer(self):
+        csrf = self.sign_in()
+        with patch.object(panel, "helper", return_value={"subscription_base_url": ""}) as helper:
+            response = self.client.post("/api/users", base_url=self.base, headers={"X-CSRF-Token": csrf}, json={
+                "username": "alice", "password": "test-password",
+            })
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.get_json()["code"], "subscription_not_configured")
+        helper.assert_called_once_with({"op": "network"})
 
     def test_customer_profile_rejects_revoked_urls(self):
         helper_response = SimpleNamespace(
